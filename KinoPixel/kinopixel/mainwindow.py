@@ -139,7 +139,7 @@ class KinoPixelWindow(QMainWindow):
 
         self.stage_tabs.addTab(self.page_sprite, make_icon("sprite", 16), "1. Sprites & Animation")
         self.stage_tabs.addTab(self.page_level, make_icon("map", 16), "2. Tiles & Level Map")
-        self.stage_tabs.addTab(self.page_wiring, make_icon("gamepad", 16), "3. Button Wiring")
+        self.stage_tabs.addTab(self.page_wiring, make_icon("gamepad", 16), "3. Logic & KinoScript")
         self.stage_tabs.addTab(self.page_sfx, make_icon("sfx", 16), "4. Chiptune & Sequence Genie")
         self.stage_tabs.addTab(self.page_play, make_icon("cartridge", 16), "5. Playtest & Build ROM")
         self.stage_tabs.currentChanged.connect(self._on_stage_changed)

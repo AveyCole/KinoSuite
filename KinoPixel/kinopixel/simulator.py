@@ -18,6 +18,7 @@ from typing import Callable, List, Optional, Set
 
 import numpy as np
 
+from .kinoscript import KinoScriptLiveRuntime
 from .models import (
     ABIL_HIGH_JUMP,
     ABIL_MORPH_BALL,
@@ -160,7 +161,11 @@ class GamePlaytestEngine:
         self.curr_keys: int = 0
         self.projs: List[_LiveProj] = []
         self.enemies: List[_LiveEnemy] = []
+        self.ks_runtime: Optional[KinoScriptLiveRuntime] = None
         self.reset()
+
+    def is_script_mode(self) -> bool:
+        return bool(self.project.script_enabled and self.project.script_code.strip())
 
     def set_project(self, project: KinoPixelProject) -> None:
         self.project = project
@@ -200,6 +205,14 @@ class GamePlaytestEngine:
         self.banner_timer = 0
         self.door_cd = 0
         self.term_cd = 0
+        if self.is_script_mode():
+            self.ks_runtime = KinoScriptLiveRuntime(
+                self.project, self.project.script_code, on_sfx=self.on_sfx, on_dma=self.on_dma
+            )
+            if self.ks_runtime.error:
+                self.banner_msg = f"SCRIPT ERR: {self.ks_runtime.error[:28]}"
+            return
+        self.ks_runtime = None
         self.load_room(0)
 
     def load_room(self, r_idx: int, tx: Optional[int] = None, ty: Optional[int] = None) -> None:
@@ -317,6 +330,12 @@ class GamePlaytestEngine:
         self._emit_sfx(self._find_sfx("coin", 1))
 
     def step(self, pressed_buttons: Set[str]) -> None:
+        if self.ks_runtime is not None:
+            self.frame += 1
+            self.ks_runtime.step(pressed_buttons)
+            if self.ks_runtime.error:
+                self.banner_msg = f"ERR: {self.ks_runtime.error[:32]}"
+            return
         self.frame += 1
         self.prev_keys = self.curr_keys
         mask = 0
@@ -720,6 +739,8 @@ class GamePlaytestEngine:
         self.cam_y = cy
 
     def render_rgb(self) -> np.ndarray:
+        if self.ks_runtime is not None:
+            return self._render_kinoscript_rgb()
         prof = self.project.profile()
         vw, vh = int(prof["width"]), int(prof["height"])
         fb = np.empty((vh, vw, 3), dtype=np.uint8)
@@ -815,4 +836,95 @@ class GamePlaytestEngine:
                 fi = max(0, min(len(hero.frames) - 1, fids[(self.anim_timer // ticks) % len(fids)]))
                 blit_sprite(hero.frames[fi], int(self.px) - self.cam_x, int(self.py) - self.cam_y, self.palette_idx, self.facing == 1)
 
+        return fb
+
+    def _render_kinoscript_rgb(self) -> np.ndarray:
+        """Render BG2 + BG0 + 128 OAM Sprites + BG1 Hardware Font/UI Layer for KinoScript mode."""
+        from .gba_compiler import FONT_ORDER, _FONT_BITMAPS
+        ks = self.ks_runtime
+        assert ks is not None
+        prof = self.project.profile()
+        vw, vh = int(prof["width"]), int(prof["height"])
+        fb = np.empty((vh, vw, 3), dtype=np.uint8)
+        bg_r, bg_g, bg_b = hex_to_rgb(self.project.bg_color_hex)
+        fb[:, :, 0] = bg_r; fb[:, :, 1] = bg_g; fb[:, :, 2] = bg_b
+
+        pal_rgbs = [np.array([hex_to_rgb(c) for c in self.project.get_palette_colors(pi)[:16]], dtype=np.uint8)
+                    for pi in range(max(1, len(self.project.palettes)))]
+        hud_pal = np.array([
+            (0, 0, 0), hex_to_rgb("#0D1322"), hex_to_rgb("#F8FAFC"), hex_to_rgb("#FDE047"),
+            hex_to_rgb("#F43F5E"), hex_to_rgb("#161A26"), hex_to_rgb("#34D399"),
+        ], dtype=np.uint8)
+
+        # BG0 Room Tilemap with bg_scroll[0]
+        sx_bg0, sy_bg0 = ks.bg_scroll[0]
+        rows = ks.cells
+        rh = len(rows)
+        rw = len(rows[0]) if rh else 0
+        tx0, tx1 = max(0, sx_bg0 // 8), min(rw, (sx_bg0 + vw) // 8 + 1)
+        ty0, ty1 = max(0, sy_bg0 // 8), min(rh, (sy_bg0 + vh) // 8 + 1)
+        for ty in range(ty0, ty1):
+            row = rows[ty]
+            sy0 = ty * 8 - sy_bg0
+            for tx in range(tx0, tx1):
+                ti = row[tx]
+                if ti <= 0 or ti >= len(self.project.tiles):
+                    continue
+                tile = self.project.tiles[ti]
+                pal = pal_rgbs[tile.palette_index % len(pal_rgbs)]
+                sx0 = tx * 8 - sx_bg0
+                pix = np.array(tile.pixels, dtype=np.uint8)
+                y0, y1 = max(0, -sy0), min(8, vh - sy0)
+                x0, x1 = max(0, -sx0), min(8, vw - sx0)
+                if y0 < y1 and x0 < x1:
+                    sub = pix[y0:y1, x0:x1]
+                    m = sub > 0
+                    if np.any(m):
+                        fb[sy0 + y0: sy0 + y1, sx0 + x0: sx0 + x1][m] = pal[sub[m]]
+
+        # 128 OAM Sprites (render slot 127..0 so slot 0 has highest priority!)
+        for slot in range(127, -1, -1):
+            ent = ks.oam[slot]
+            if ent is None:
+                continue
+            sx, sy, sp_idx, fr_idx, pal_idx, hflip = ent
+            if not (0 <= sp_idx < len(self.project.sprites)):
+                continue
+            sp = self.project.sprites[sp_idx]
+            if not sp.frames:
+                continue
+            pix = np.array(sp.frames[fr_idx % len(sp.frames)], dtype=np.uint8)
+            if hflip:
+                pix = pix[:, ::-1]
+            pal = pal_rgbs[pal_idx % len(pal_rgbs)]
+            sh, sw = pix.shape
+            y0, y1 = max(0, -sy), min(sh, vh - sy)
+            x0, x1 = max(0, -sx), min(sw, vw - sx)
+            if y0 < y1 and x0 < x1:
+                sub = pix[y0:y1, x0:x1]
+                m = sub > 0
+                if np.any(m):
+                    fb[sy + y0: sy + y1, sx + x0: sx + x1][m] = pal[sub[m]]
+
+        # BG1 Crisp Font / UI Box / Highlight Layer (exact parity with GBA BG1 VRAM!)
+        for ty in range(min(20, vh // 8)):
+            for tx in range(min(30, vw // 8)):
+                tid, pslot = ks.ui_tiles[ty][tx]
+                if tid <= 0 or tid >= len(FONT_ORDER):
+                    continue
+                key = FONT_ORDER[tid]
+                bmp = _FONT_BITMAPS[key]
+                c_idx = 2
+                if key == "HEART": c_idx = 4
+                elif key == "COIN": c_idx = 3
+                elif key == "BEZEL": c_idx = 5
+                elif key == "BOX": c_idx = 1
+                elif key == "BAR": c_idx = 6
+                col = hud_pal[c_idx]
+                sy0, sx0 = ty * 8, tx * 8
+                for py in range(8):
+                    brow = bmp[py]
+                    for px in range(8):
+                        if brow[px] == "#":
+                            fb[sy0 + py, sx0 + px] = col
         return fb

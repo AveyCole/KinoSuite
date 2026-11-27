@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .arm_asm import (
     ArmAssembler,
@@ -89,6 +89,7 @@ from .models import (
     hex_to_bgr555,
 )
 from .sequence_genie import compile_genie_to_gba_bgm
+from .kinoscript import KS_RAM_BASE, KinoScriptArmCompiler
 
 # ---------------------------------------------------------------------------
 # Authentic Verified Hardware Cartridge Logo Bytes
@@ -335,6 +336,8 @@ ST_VARS = 0x3E0
 
 # Visited Rooms Bitmask: 4 words = 128 rooms (0x400 .. 0x40F)
 ST_VISITED = 0x400
+ST_KS_RNG = 0x410
+ST_KS_BGM = 0x414
 
 # Room Descriptor Offsets (64 bytes per room)
 RM_LVL_W = 0x00
@@ -448,6 +451,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     obj_tiles_bytes = bytearray()
     next_obj_tile = 0
     sprite_bases: Dict[int, Tuple[int, int, int, int]] = {}
+    sprite_meta_words: List[int] = []  # 4 words/sprite: [tile_base, tpf, a0_sh, a1_sz]
 
     for si, sp in enumerate(project.sprites):
         w = 64 if sp.width >= 64 else (32 if sp.width >= 32 else 16)
@@ -461,11 +465,19 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
             obj_tiles_bytes.extend(_pack_metasprite_4bpp(fr, w, h))
             next_obj_tile += tpf
         sprite_bases[si] = (base, len(frames), w, h)
+        sh_bits, sz_bits = _oam_shape_size_flags(w, h)
+        sprite_meta_words.extend([base, tpf, sh_bits, sz_bits])
 
     if 0 not in sprite_bases:
         obj_tiles_bytes.extend(bytes(128))
         sprite_bases[0] = (0, 1, 16, 16)
+        sprite_meta_words.extend([0, 4, 0x0000, 0x4000])
         next_obj_tile = 4
+
+    use_kinoscript = bool(project.script_enabled and project.script_code.strip())
+    ks_compiler: Optional[KinoScriptArmCompiler] = (
+        KinoScriptArmCompiler(project.script_code, FONT_INDEX) if use_kinoscript else None
+    )
 
     hero_base, hero_fcount, hero_w, hero_h = sprite_bases[0]
     hero_tpf = (hero_w // 8) * (hero_h // 8)
@@ -699,11 +711,20 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
 
     asm.bl("hide_all_oam")
 
-    # Initialize fresh game state, then auto-load valid SRAM save if enabled
-    asm.bl("reset_new_game")
-    asm.ldr(R0, R10, CFG_SRAM_EN)
-    asm.cmp_imm(R0, 0)
-    asm.bl("load_from_sram", "NE")
+    # Initialize fresh game state (KinoScript Custom Engine OR Visual Engine)
+    if use_kinoscript:
+        asm.ldr_lit(R9, KS_RAM_BASE)
+        asm.ldr_lit(R0, 0x12345678)
+        asm.str(R0, R11, ST_KS_RNG)
+        asm.ldr(R0, R10, CFG_BGM_EN)
+        asm.str(R0, R11, ST_KS_BGM)
+        asm.bl("reset_new_game")
+        asm.bl("ks_init_globals")
+    else:
+        asm.bl("reset_new_game")
+        asm.ldr(R0, R10, CFG_SRAM_EN)
+        asm.cmp_imm(R0, 0)
+        asm.bl("load_from_sram", "NE")
 
     # Configure Display: Mode 0 | 1D OBJ (0x40) | BG0 (0x100) | BG1 (0x200) | BG2 (0x400) | OBJ (0x1000) = 0x1740
     asm.ldr_lit(R0, 0x04000008)
@@ -774,6 +795,14 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R3, R11, ST_PRESS_K)
     asm.bic_reg(R3, R2, R1)
     asm.str(R3, R11, ST_REL_K)
+
+    if use_kinoscript:
+        asm.bl("ks_fn_on_frame")
+        asm.ldr(R0, R11, ST_KS_BGM)
+        asm.cmp_imm(R0, 0)
+        asm.bl("update_bgm_genie", "NE")
+        asm.b("main_loop")
+        asm.pool()
 
     # Multi-Page Dialogue Box: Page 0 -> Page 1 (if non-empty) -> Close!
     asm.ldr(R0, R11, ST_DIALOG_ON)
@@ -859,11 +888,12 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.bl("update_bgm_genie")
 
     asm.label("after_gameplay")
-    asm.bl("update_camera")
-    asm.bl("render_oam")
-    asm.bl("render_hud")
-    asm.b("main_loop")
-    asm.pool()
+    if not use_kinoscript:
+        asm.bl("update_camera")
+        asm.bl("render_oam")
+        asm.bl("render_hud")
+        asm.b("main_loop")
+        asm.pool()
 
     # ==================================================================
     # Helpers: get_hero_h -> R0, bit_mask(R0=bit 0..31) -> R0=(1<<bit)
@@ -3407,11 +3437,22 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.bx(LR)
     asm.pool()
 
+    # ==================================================================
+    # KinoScript ARM7TDMI Hardware Runtime Library + Compiled User Code!
+    # ==================================================================
+    if use_kinoscript and ks_compiler is not None:
+        _emit_kinoscript_runtime(asm, len(project.sprites) or 1)
+        ks_compiler.emit_code_and_data(asm)
+
     # ------------------------------------------------------------------
     # 4. Emit Packed ROM Data Tables + Official GBA SRAM Tag!
     # ------------------------------------------------------------------
     asm.align(4)
     asm.emit_bytes(b"SRAM_V113\x00\x00\x00")
+
+    asm.label("ROM_SPRITE_META")
+    for w in sprite_meta_words:
+        asm.emit32(w)
 
     asm.label("ROM_CONFIG")
     for w in config_words:
@@ -3538,7 +3579,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     return BuildReport(
         output_path=output_path,
         rom_size=len(rom),
-        format_name=f"GBA v3.0 (.gba) [{project.target_system} · {project.physics_mode} · {len(rooms)} Room(s) · 5-Voice Audio]",
+        format_name=f"GBA v3.0 (.gba) [{'KinoScript Native ARM' if use_kinoscript else project.physics_mode} · {len(rooms)} Room(s) · 5-Voice Audio]",
         title=clean_title,
         checksum_hex=f"0x{chk:02X}",
         bg_tiles=len(project.tiles),
@@ -3549,6 +3590,409 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         rooms_compiled=len(rooms),
         warnings=warnings,
     )
+
+
+def _emit_kinoscript_runtime(asm: ArmAssembler, num_sprites: int) -> None:
+    """Emit compact ARM7TDMI hardware runtime library called by compiled KinoScript functions."""
+    # --- ks_rt_divmod(R0=num, R1=den) -> R0=quot, R1=rem (32-bit signed binary restoring division) ---
+    asm.label("ks_rt_divmod")
+    asm.push([R4, R5, R6, R7, LR])
+    asm.cmp_imm(R1, 0)
+    asm.b("ksd_zero", "EQ")
+    # Save signs: R6 = num_neg (0/1), R7 = quot_neg (0/1)
+    asm.mov_imm(R6, 0)
+    asm.mov_imm(R7, 0)
+    asm.cmp_imm(R0, 0)
+    asm.b("ksd_num_pos", "GE")
+    asm.rsb_imm(R0, R0, 0)
+    asm.mov_imm(R6, 1)
+    asm.eor_imm(R7, R7, 1)
+    asm.label("ksd_num_pos")
+    asm.cmp_imm(R1, 0)
+    asm.b("ksd_den_pos", "GE")
+    asm.rsb_imm(R1, R1, 0)
+    asm.eor_imm(R7, R7, 1)
+    asm.label("ksd_den_pos")
+    asm.mov_imm(R2, 0)  # quot
+    asm.mov_imm(R3, 0)  # rem
+    asm.mov_imm(R4, 32)
+    asm.label("ksd_loop")
+    asm.mov_reg(R3, R3, "LSL", 1)
+    asm.mov_reg(R5, R0, "LSR", 31)
+    asm.orr_reg(R3, R3, R5)
+    asm.mov_reg(R0, R0, "LSL", 1)
+    asm.mov_reg(R2, R2, "LSL", 1)
+    asm.cmp_reg(R3, R1)
+    asm.sub_reg(R3, R3, R1, cond="HS")
+    asm.orr_imm(R2, R2, 1, cond="HS")
+    asm.sub_imm(R4, R4, 1, s=True)
+    asm.b("ksd_loop", "NE")
+    asm.mov_reg(R0, R2)
+    asm.mov_reg(R1, R3)
+    asm.cmp_imm(R7, 0)
+    asm.rsb_imm(R0, R0, 0, cond="NE")
+    asm.cmp_imm(R6, 0)
+    asm.rsb_imm(R1, R1, 0, cond="NE")
+    asm.pop([R4, R5, R6, R7, PC])
+    asm.label("ksd_zero")
+    asm.mov_imm(R0, 0)
+    asm.mov_imm(R1, 0)
+    asm.pop([R4, R5, R6, R7, PC])
+
+    # --- ks_rt_shl(R0=v, R1=amt) / ks_rt_shr(R0=v, R1=amt) ---
+    asm.label("ks_rt_shl")
+    asm.and_imm(R1, R1, 31)
+    asm.cmp_imm(R1, 0)
+    asm.bx(LR, "EQ")
+    asm.label("ksshl_lp")
+    asm.mov_reg(R0, R0, "LSL", 1)
+    asm.sub_imm(R1, R1, 1, s=True)
+    asm.b("ksshl_lp", "NE")
+    asm.bx(LR)
+
+    asm.label("ks_rt_shr")
+    asm.and_imm(R1, R1, 31)
+    asm.cmp_imm(R1, 0)
+    asm.bx(LR, "EQ")
+    asm.label("ksshr_lp")
+    asm.mov_reg(R0, R0, "ASR", 1)
+    asm.sub_imm(R1, R1, 1, s=True)
+    asm.b("ksshr_lp", "NE")
+    asm.bx(LR)
+
+    # --- Input & Frame ---
+    for fn_name, st_off in (("ks_rt_key_held", ST_CURR_K), ("ks_rt_key_pressed", ST_PRESS_K), ("ks_rt_key_released", ST_REL_K)):
+        asm.label(fn_name)
+        asm.ldr(R1, R11, st_off)
+        asm.tst_reg(R1, R0)
+        asm.mov_imm(R0, 1, cond="NE")
+        asm.mov_imm(R0, 0, cond="EQ")
+        asm.bx(LR)
+
+    asm.label("ks_rt_frame_count")
+    asm.ldr(R0, R11, ST_FRAME)
+    asm.bx(LR)
+
+    # --- Room & Tilemaps ---
+    asm.label("ks_rt_load_room")
+    asm.push([LR])
+    asm.mov_imm(R1, 0)
+    asm.mov_imm(R2, 0)
+    asm.bl("load_room")
+    asm.mov_imm(R0, 0)
+    asm.pop([PC])
+
+    asm.label("ks_rt_room_width")
+    asm.ldr(R0, R11, ST_ROOM_PTR)
+    asm.ldr(R0, R0, RM_LVL_W)
+    asm.mov_reg(R0, R0, "ASR", 3)
+    asm.bx(LR)
+
+    asm.label("ks_rt_room_height")
+    asm.ldr(R0, R11, ST_ROOM_PTR)
+    asm.ldr(R0, R0, RM_LVL_H)
+    asm.mov_reg(R0, R0, "ASR", 3)
+    asm.bx(LR)
+
+    asm.label("ks_rt_get_tile")
+    asm.cmp_imm(R0, 0)
+    asm.b("ksgt_zero", "LT")
+    asm.cmp_imm(R0, 64)
+    asm.b("ksgt_zero", "GE")
+    asm.cmp_imm(R1, 0)
+    asm.b("ksgt_zero", "LT")
+    asm.cmp_imm(R1, 32)
+    asm.b("ksgt_zero", "GE")
+    asm.add_reg(R2, R0, R1, "LSL", 6)
+    asm.mov_reg(R2, R2, "LSL", 1)
+    asm.ldr_lit(R3, 0x02000000)
+    asm.ldrh_reg(R0, R3, R2)
+    asm.and_imm(R0, R0, 0xFF)
+    asm.bx(LR)
+    asm.label("ksgt_zero")
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_get_tile_type")
+    asm.push([LR])
+    asm.bl("ks_rt_get_tile")
+    asm.ldr_lit(R3, "ROM_TILE_TYPES")
+    asm.ldrb_reg(R0, R3, R0)
+    asm.pop([PC])
+
+    asm.label("ks_rt_set_tile")
+    asm.push([LR])
+    asm.cmp_imm(R0, 0)
+    asm.b("ksst_ret", "LT")
+    asm.cmp_imm(R0, 64)
+    asm.b("ksst_ret", "GE")
+    asm.cmp_imm(R1, 0)
+    asm.b("ksst_ret", "LT")
+    asm.cmp_imm(R1, 32)
+    asm.b("ksst_ret", "GE")
+    asm.bl("set_bg0_tile")
+    asm.label("ksst_ret")
+    asm.mov_imm(R0, 0)
+    asm.pop([PC])
+
+    asm.label("ks_rt_set_ui_tile")
+    asm.and_imm(R0, R0, 31)
+    asm.and_imm(R1, R1, 31)
+    asm.and_imm(R3, R3, 15)
+    asm.ldr_lit(R12, 0x3FF)
+    asm.and_reg(R2, R2, R12)
+    asm.orr_reg(R2, R2, R3, "LSL", 12)
+    asm.ldr_lit(R12, 0x0600F000)
+    asm.add_reg(R12, R12, R1, "LSL", 6)
+    asm.add_reg(R12, R12, R0, "LSL", 1)
+    asm.strh(R2, R12, 0)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_set_bg2_tile")
+    asm.and_imm(R0, R0, 31)
+    asm.and_imm(R1, R1, 31)
+    asm.and_imm(R3, R3, 15)
+    asm.ldr_lit(R12, 0x3FF)
+    asm.and_reg(R2, R2, R12)
+    asm.orr_reg(R2, R2, R3, "LSL", 12)
+    asm.ldr_lit(R12, 0x0600D000)
+    asm.add_reg(R12, R12, R1, "LSL", 6)
+    asm.add_reg(R12, R12, R0, "LSL", 1)
+    asm.strh(R2, R12, 0)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_scroll_bg")
+    asm.and_imm(R0, R0, 3)
+    asm.ldr_lit(R3, 0x04000010)
+    asm.add_reg(R3, R3, R0, "LSL", 2)
+    asm.strh(R1, R3, 0)
+    asm.strh(R2, R3, 2)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+    asm.pool()
+
+    # --- BG1 Text, Numbers & UI Boxes ---
+    asm.label("ks_rt_draw_text")
+    asm.and_imm(R0, R0, 31)
+    asm.and_imm(R1, R1, 31)
+    asm.ldr_lit(R3, 0x0600F000)
+    asm.add_reg(R3, R3, R1, "LSL", 6)
+    asm.add_reg(R3, R3, R0, "LSL", 1)
+    asm.label("ksdt_lp")
+    asm.ldrb(R12, R2, 0)
+    asm.cmp_imm(R12, 0xFF)
+    asm.b("ksdt_done", "EQ")
+    asm.orr_imm(R12, R12, 0xF000)
+    asm.strh(R12, R3, 0)
+    asm.add_imm(R2, R2, 1)
+    asm.add_imm(R3, R3, 2)
+    asm.b("ksdt_lp")
+    asm.label("ksdt_done")
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_draw_num")
+    # R0=tx, R1=ty, R2=val, R3=digits
+    asm.push([R4, R5, R6, R7, LR])
+    asm.cmp_imm(R3, 1)
+    asm.mov_imm(R3, 1, cond="LT")
+    asm.cmp_imm(R3, 6)
+    asm.mov_imm(R3, 6, cond="GT")
+    asm.cmp_imm(R2, 0)
+    asm.mov_imm(R2, 0, cond="LT")
+    asm.and_imm(R0, R0, 31)
+    asm.and_imm(R1, R1, 31)
+    asm.add_reg(R0, R0, R3)
+    asm.sub_imm(R0, R0, 1)  # rightmost col
+    asm.ldr_lit(R4, 0x0600F000)
+    asm.add_reg(R4, R4, R1, "LSL", 6)
+    asm.add_reg(R4, R4, R0, "LSL", 1)
+    asm.mov_reg(R5, R2)     # remaining val
+    asm.mov_reg(R6, R3)     # remaining digits
+    asm.label("ksdn_lp")
+    asm.mov_reg(R0, R5)
+    asm.mov_imm(R1, 10)
+    asm.bl("ks_rt_divmod")
+    asm.mov_reg(R5, R0)
+    asm.add_imm(R1, R1, FONT_INDEX["0"])
+    asm.orr_imm(R1, R1, 0xF000)
+    asm.strh(R1, R4, 0)
+    asm.sub_imm(R4, R4, 2)
+    asm.sub_imm(R6, R6, 1, s=True)
+    asm.b("ksdn_lp", "NE")
+    asm.mov_imm(R0, 0)
+    asm.pop([R4, R5, R6, R7, PC])
+
+    # Helper for draw_box / clear_ui_rect: R0=tx, R1=ty, R2=w, R3=h, R12=tile_hw
+    asm.label("ks_rt_draw_box")
+    asm.ldr_lit(R12, (15 << 12) | FONT_INDEX["BOX"])
+    asm.b("ks_rt_fill_ui_rect")
+
+    asm.label("ks_rt_clear_ui_rect")
+    asm.ldr_lit(R12, (15 << 12) | FONT_INDEX[" "])
+
+    asm.label("ks_rt_fill_ui_rect")
+    asm.push([R4, R5, R6, R7, LR])
+    asm.cmp_imm(R2, 0)
+    asm.b("ksfr_done", "LE")
+    asm.cmp_imm(R3, 0)
+    asm.b("ksfr_done", "LE")
+    asm.mov_reg(R5, R1)
+    asm.add_reg(R6, R1, R3)
+    asm.label("ksfr_y")
+    asm.cmp_reg(R5, R6)
+    asm.b("ksfr_done", "GE")
+    asm.and_imm(R7, R5, 31)
+    asm.ldr_lit(R4, 0x0600F000)
+    asm.add_reg(R4, R4, R7, "LSL", 6)
+    asm.mov_reg(R7, R0)
+    asm.mov_reg(R1, R2)
+    asm.label("ksfr_x")
+    asm.and_imm(R7, R7, 31)
+    asm.mov_reg(R3, R7, "LSL", 1)
+    asm.strh_reg(R12, R4, R3)
+    asm.add_imm(R7, R7, 1)
+    asm.sub_imm(R1, R1, 1, s=True)
+    asm.b("ksfr_x", "NE")
+    asm.add_imm(R5, R5, 1)
+    asm.b("ksfr_y")
+    asm.label("ksfr_done")
+    asm.mov_imm(R0, 0)
+    asm.pop([R4, R5, R6, R7, PC])
+
+    asm.label("ks_rt_clear_ui")
+    asm.ldr_lit(R0, 0x0600F000)
+    asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[" "])
+    asm.mov_imm(R2, 1024)
+    asm.label("kscu_lp")
+    asm.strh(R1, R0, 0)
+    asm.add_imm(R0, R0, 2)
+    asm.sub_imm(R2, R2, 1, s=True)
+    asm.b("kscu_lp", "NE")
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+    asm.pool()
+
+    # --- OAM 128 Hardware Sprites ---
+    asm.label("ks_rt_set_sprite")
+    # R0 points to stack args: [+24]=slot, [+20]=x, [+16]=y, [+12]=sp_idx, [+8]=frame, [+4]=pal, [+0]=hflip
+    asm.push([R4, R5, R6, R7, LR])
+    asm.ldr(R1, R0, 24)  # slot
+    asm.and_imm(R1, R1, 127)
+    asm.ldr_lit(R4, 0x07000000)
+    asm.add_reg(R4, R4, R1, "LSL", 3)
+    asm.ldr(R2, R0, 20)  # x
+    asm.ldr(R3, R0, 16)  # y
+    asm.cmp_imm(R2, -64)
+    asm.b("kssp_hide", "LT")
+    asm.cmp_imm(R2, 240)
+    asm.b("kssp_hide", "GE")
+    asm.cmp_imm(R3, -64)
+    asm.b("kssp_hide", "LT")
+    asm.cmp_imm(R3, 160)
+    asm.b("kssp_hide", "GE")
+
+    asm.ldr(R5, R0, 12)  # sp_idx
+    asm.cmp_imm(R5, 0)
+    asm.mov_imm(R5, 0, cond="LT")
+    asm.ldr_lit(R6, max(1, num_sprites) - 1)
+    asm.cmp_reg(R5, R6)
+    asm.mov_reg(R5, R6, cond="GT")
+    asm.ldr_lit(R6, "ROM_SPRITE_META")
+    asm.add_reg(R6, R6, R5, "LSL", 4)  # 16 bytes per sprite meta
+
+    # attr0 = (y & 0xFF) | shape_bits
+    asm.and_imm(R3, R3, 0xFF)
+    asm.ldr(R7, R6, 8)
+    asm.orr_reg(R3, R3, R7)
+
+    # attr1 = (x & 0x1FF) | size_bits | (hflip ? 0x1000 : 0)
+    asm.ldr_lit(R7, 0x1FF)
+    asm.and_reg(R2, R2, R7)
+    asm.ldr(R7, R6, 12)
+    asm.orr_reg(R2, R2, R7)
+    asm.ldr(R7, R0, 0)   # hflip
+    asm.cmp_imm(R7, 0)
+    asm.orr_imm(R2, R2, 0x1000, cond="NE")
+
+    # tile_id = base + frame * tpf
+    asm.ldr(R5, R0, 8)   # frame
+    asm.ldr(R7, R6, 4)   # tpf
+    asm.mul(R12, R5, R7)
+    asm.ldr(R7, R6, 0)   # base
+    asm.add_reg(R7, R7, R12)
+    asm.ldr_lit(R12, 0x3FF)
+    asm.and_reg(R7, R7, R12)
+    asm.ldr(R5, R0, 4)   # pal
+    asm.and_imm(R5, R5, 15)
+    asm.orr_reg(R7, R7, R5, "LSL", 12)
+    asm.orr_imm(R7, R7, 0x0400)        # priority 1 (below BG1 UI!)
+
+    asm.strh(R3, R4, 0)
+    asm.strh(R2, R4, 2)
+    asm.strh(R7, R4, 4)
+    asm.mov_imm(R0, 0)
+    asm.pop([R4, R5, R6, R7, PC])
+
+    asm.label("kssp_hide")
+    asm.mov_imm(R2, 0x0200)
+    asm.strh(R2, R4, 0)
+    asm.mov_imm(R0, 0)
+    asm.pop([R4, R5, R6, R7, PC])
+
+    asm.label("ks_rt_hide_sprite")
+    asm.and_imm(R0, R0, 127)
+    asm.ldr_lit(R1, 0x07000000)
+    asm.add_reg(R1, R1, R0, "LSL", 3)
+    asm.mov_imm(R2, 0x0200)
+    asm.strh(R2, R1, 0)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_hide_all_sprites")
+    asm.b("hide_all_oam")
+
+    # --- Audio, SRAM & RNG ---
+    asm.label("ks_rt_play_sfx")
+    asm.b("play_sfx")
+
+    asm.label("ks_rt_play_dma")
+    asm.b("play_dma_pcm")
+
+    asm.label("ks_rt_bgm_enable")
+    asm.str(R0, R11, ST_KS_BGM)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_sram_write")
+    asm.ldr_lit(R2, 0x7FFF)
+    asm.and_reg(R0, R0, R2)
+    asm.ldr_lit(R3, 0x0E000000)
+    asm.strb_reg(R1, R3, R0)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_sram_read")
+    asm.ldr_lit(R2, 0x7FFF)
+    asm.and_reg(R0, R0, R2)
+    asm.ldr_lit(R3, 0x0E000000)
+    asm.ldrb_reg(R0, R3, R0)
+    asm.bx(LR)
+
+    asm.label("ks_rt_rand")
+    asm.ldr(R1, R11, ST_KS_RNG)
+    asm.ldr_lit(R2, 1103515245)
+    asm.mul(R0, R1, R2)
+    asm.ldr_lit(R2, 12345)
+    asm.add_reg(R0, R0, R2)
+    asm.ldr_lit(R2, 0x7FFFFFFF)
+    asm.and_reg(R0, R0, R2)
+    asm.str(R0, R11, ST_KS_RNG)
+    asm.mov_reg(R0, R0, "LSR", 16)
+    asm.bx(LR)
+    asm.pool()
 
 
 # ---------------------------------------------------------------------------

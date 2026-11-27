@@ -753,6 +753,9 @@ class KinoPixelProject:
     sfx_list: List[SfxPatch] = field(default_factory=list)
     sequence_genie: SequenceGenieData = field(default_factory=SequenceGenieData)
     direct_sound: DirectSoundConfig = field(default_factory=DirectSoundConfig)
+    # KinoScript Native ARM7TDMI Custom Engine Scripting (Unrestricted Game Logic!)
+    script_enabled: bool = False
+    script_code: str = ""
     file_path: Optional[str] = None
     dirty: bool = False
 
@@ -853,6 +856,8 @@ class KinoPixelProject:
         self.sfx_list = fresh.sfx_list
         self.sequence_genie = fresh.sequence_genie
         self.direct_sound = fresh.direct_sound
+        self.script_enabled = fresh.script_enabled
+        self.script_code = fresh.script_code
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -880,6 +885,8 @@ class KinoPixelProject:
             "sfx_list": [x.to_dict() for x in self.sfx_list],
             "sequence_genie": self.sequence_genie.to_dict(),
             "direct_sound": self.direct_sound.to_dict(),
+            "script_enabled": bool(self.script_enabled),
+            "script_code": str(self.script_code),
         }
 
     @classmethod
@@ -914,6 +921,8 @@ class KinoPixelProject:
             sfx_list=[SfxPatch.from_dict(x) for x in d.get("sfx_list", [])],
             sequence_genie=SequenceGenieData.from_dict(d["sequence_genie"]) if "sequence_genie" in d else SequenceGenieData(),
             direct_sound=DirectSoundConfig.from_dict(d["direct_sound"]) if "direct_sound" in d else DirectSoundConfig(),
+            script_enabled=bool(d.get("script_enabled", False)),
+            script_code=str(d.get("script_code", "")),
         )
         proj.sequence_genie.ensure_initialized()
         return proj

@@ -310,6 +310,9 @@ class ArmAssembler:
     def ldrb_reg(self, rd: int, rn: int, rm: int, cond: str = "") -> None:
         self._ls_reg(True, True, rd, rn, rm, "LSL", 0, cond)
 
+    def strb_reg(self, rd: int, rn: int, rm: int, cond: str = "") -> None:
+        self._ls_reg(False, True, rd, rn, rm, "LSL", 0, cond)
+
     def ldrh(self, rd: int, rn: int, offset: int = 0, cond: str = "") -> None:
         self._lsh_imm(True, 0, 1, rd, rn, offset, cond)
 

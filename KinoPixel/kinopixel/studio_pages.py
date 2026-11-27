@@ -43,6 +43,7 @@ from .audio_sfx import ChiptuneAudioPlayer, DIRECT_SOUND_PRESETS, synthesize_sfx
 from .gba_compiler import BuildReport, compile_gb_rom, compile_gba_rom, export_c_source
 from .genie_widget import SequenceGeniePanel
 from .icons import make_icon
+from .kinoscript import validate_kinoscript
 from .models import (
     ABILITY_NAMES,
     ACTION_AIM_UP,
@@ -1069,8 +1070,17 @@ class ButtonWiringPage(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        root = QHBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(6)
+
+        self.logic_tabs = QTabWidget()
+        self.logic_tabs.setDocumentMode(True)
+
+        # Sub-Tab 1: Visual Button & Event Wiring
+        vis_tab = QWidget()
+        root = QHBoxLayout(vis_tab)
+        root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(10)
 
         # Left: Interactive Handheld Diagram + Quick Presets
@@ -1127,6 +1137,90 @@ class ButtonWiringPage(QWidget):
         right.addWidget(self.scroll, 1)
         root.addLayout(right, 3)
 
+        self.logic_tabs.addTab(vis_tab, "Visual Button & Variable Wiring (Zero-Code)")
+
+        # Sub-Tab 2: KinoScript Native ARM7TDMI Studio (Unrestricted Custom Game Logic!)
+        ks_tab = QWidget()
+        kroot = QHBoxLayout(ks_tab)
+        kroot.setContentsMargins(6, 6, 6, 6)
+        kroot.setSpacing(10)
+
+        kleft = QVBoxLayout()
+        kbar = QWidget()
+        kbar.setObjectName("CardFrame")
+        kbl = QHBoxLayout(kbar)
+        kbl.setContentsMargins(8, 5, 8, 5)
+        self.cb_ks_enable = QCheckBox("Enable Custom KinoScript Engine (Compiles directly to ARM7TDMI .gba ROM)")
+        self.cb_ks_enable.toggled.connect(self._on_ks_toggled)
+        kbl.addWidget(self.cb_ks_enable, 1)
+        b_val = QPushButton("Check & Compile ARM")
+        b_val.setObjectName("PrimaryButton")
+        b_val.clicked.connect(self._validate_ks)
+        kbl.addWidget(b_val)
+        b_tpl = QPushButton("Insert Starter...")
+        b_tpl.clicked.connect(self._insert_ks_starter)
+        kbl.addWidget(b_tpl)
+        kleft.addWidget(kbar)
+
+        self.ed_ks = QPlainTextEdit()
+        self.ed_ks.setStyleSheet("font-family:Consolas; font-size:9.5pt; line-height:1.35;")
+        self.ed_ks.setPlaceholderText(
+            "# Write unrestricted Python-syntax GBA logic here!\n"
+            "# Compiles directly to native ARM7TDMI machine code with zero external SDK.\n"
+            "def on_init():\n    clear_ui()\n    draw_text(2, 1, 'HELLO GBA!')\n\n"
+            "def on_frame():\n    pass\n"
+        )
+        self.ed_ks.textChanged.connect(self._on_ks_text_changed)
+        kleft.addWidget(self.ed_ks, 1)
+
+        self.lbl_ks_status = QLabel("Visual Mode Active — check 'Enable Custom KinoScript Engine' to take full hardware control.")
+        self.lbl_ks_status.setStyleSheet("color:#94A3B8; font-family:Consolas; font-size:8.5pt; padding:3px;")
+        kleft.addWidget(self.lbl_ks_status)
+        kroot.addLayout(kleft, 3)
+
+        # Right: Built-in GBA Hardware API Quick Reference
+        ref_box = QGroupBox("KinoScript GBA Hardware API (128 OAM · 3 BGs · 240KB RAM · SRAM · Audio)")
+        rl = QVBoxLayout(ref_box)
+        ref = QPlainTextEdit()
+        ref.setReadOnly(True)
+        ref.setStyleSheet("font-family:Consolas; font-size:8.2pt; color:#CBD5E1;")
+        ref.setPlainText(
+            "LIFECYCLE:\n"
+            "  def on_init():   # Called once at GBA boot\n"
+            "  def on_frame():  # Called at 60 FPS VBlank\n\n"
+            "GLOBALS & ARRAYS (240 KB EWRAM):\n"
+            "  score = 0\n"
+            "  u_hp = [0] * 32\n"
+            "  costs = [1000, 2000, 3000, 4000]\n\n"
+            "INPUT (BTN_A/B/L/R/UP/DOWN/LEFT/RIGHT/START/SELECT):\n"
+            "  key_held(BTN_RIGHT)\n"
+            "  key_pressed(BTN_A)\n"
+            "  key_released(BTN_B)\n\n"
+            "128 HARDWARE OAM SPRITES (16x16..64x64):\n"
+            "  set_sprite(slot, x, y, sp_idx, frame, pal, hflip)\n"
+            "  hide_sprite(slot)\n"
+            "  hide_all_sprites()\n\n"
+            "TILEMAPS & BG1 UI:\n"
+            "  load_room(idx), room_width(), room_height()\n"
+            "  get_tile(tx, ty), get_tile_type(tx, ty)\n"
+            "  set_tile(tx, ty, tile_id)\n"
+            "  set_ui_tile(tx, ty, tile_id, pal)\n"
+            "  scroll_bg(layer, x, y)\n"
+            "  draw_box(tx, ty, w, h)\n"
+            "  draw_text(tx, ty, 'TEXT')\n"
+            "  draw_num(tx, ty, val, digits)\n"
+            "  clear_ui_rect(tx, ty, w, h), clear_ui()\n\n"
+            "AUDIO, SRAM & MATH:\n"
+            "  play_sfx(idx), play_dma(), bgm_enable(1)\n"
+            "  sram_write(addr, val), sram_read(addr)\n"
+            "  frame_count(), rand(), abs(x), min(a,b), max(a,b), clamp(x,lo,hi)\n"
+        )
+        rl.addWidget(ref)
+        kroot.addWidget(ref_box, 2)
+
+        self.logic_tabs.addTab(ks_tab, "KinoScript Native ARM7TDMI Studio (Full Custom Engine)")
+        outer.addWidget(self.logic_tabs, 1)
+
     def set_project(self, proj: KinoPixelProject) -> None:
         self.project = proj
         self.filter_btn = ""
@@ -1144,8 +1238,94 @@ class ButtonWiringPage(QWidget):
         self.sp_start_v0.blockSignals(True)
         self.sp_start_v0.setValue(int(self.project.starting_vars[0]) if self.project.starting_vars else 10)
         self.sp_start_v0.blockSignals(False)
+        self.cb_ks_enable.blockSignals(True)
+        self.cb_ks_enable.setChecked(bool(self.project.script_enabled))
+        self.cb_ks_enable.blockSignals(False)
+        self.ed_ks.blockSignals(True)
+        if self.ed_ks.toPlainText() != self.project.script_code:
+            self.ed_ks.setPlainText(self.project.script_code)
+        self.ed_ks.blockSignals(False)
+        if self.project.script_enabled and self.project.script_code.strip():
+            self._validate_ks(silent=True)
+        else:
+            self.lbl_ks_status.setText("Visual Mode Active — enable KinoScript to compile custom ARM7TDMI logic.")
+            self.lbl_ks_status.setStyleSheet("color:#94A3B8; font-family:Consolas; font-size:8.5pt; padding:3px;")
         self.diagram.set_project(self.project)
         self._rebuild_cards()
+
+    def _on_ks_toggled(self, on: bool) -> None:
+        if not self.project:
+            return
+        self.project.script_enabled = on
+        if on and not self.project.script_code.strip():
+            self._insert_ks_starter(preset="Blank Custom GBA Loop")
+        self.projectModified.emit("Toggle KinoScript Engine")
+        if on:
+            self._validate_ks(silent=True)
+
+    def _on_ks_text_changed(self) -> None:
+        if self.project:
+            self.project.script_code = self.ed_ks.toPlainText()
+            self.project.dirty = True
+
+    def _validate_ks(self, silent: bool = False) -> None:
+        if not self.project:
+            return
+        code = self.ed_ks.toPlainText()
+        self.project.script_code = code
+        ok, msg, _ = validate_kinoscript(code)
+        if ok:
+            self.lbl_ks_status.setText(f"✓ {msg}")
+            self.lbl_ks_status.setStyleSheet("color:#34D399; font-family:Consolas; font-size:8.5pt; font-weight:600; padding:3px;")
+        else:
+            self.lbl_ks_status.setText(f"✕ {msg}")
+            self.lbl_ks_status.setStyleSheet("color:#F43F5E; font-family:Consolas; font-size:8.5pt; font-weight:600; padding:3px;")
+
+    def _insert_ks_starter(self, preset: Optional[str] = None) -> None:
+        if not self.project:
+            return
+        if not preset:
+            choice, ok = QInputDialog.getItem(
+                self, "Insert KinoScript Starter", "Choose Starter Script:",
+                ["Blank Custom GBA Loop", "Simple Cursor & Menu Sandbox"], 0, False,
+            )
+            if not ok:
+                return
+            preset = choice
+        if "Cursor" in preset:
+            src = (
+                "cx = 4\ncy = 4\n\n"
+                "def on_init():\n"
+                "    clear_ui()\n"
+                "    draw_text(1, 0, 'CUSTOM KINOSCRIPT GBA')\n\n"
+                "def on_frame():\n"
+                "    if key_pressed(BTN_RIGHT):\n        cx = clamp(cx + 1, 0, 14)\n        play_sfx(1)\n"
+                "    if key_pressed(BTN_LEFT):\n        cx = clamp(cx - 1, 0, 14)\n        play_sfx(1)\n"
+                "    if key_pressed(BTN_DOWN):\n        cy = clamp(cy + 1, 1, 8)\n        play_sfx(1)\n"
+                "    if key_pressed(BTN_UP):\n        cy = clamp(cy - 1, 1, 8)\n        play_sfx(1)\n"
+                "    set_sprite(0, cx * 16, cy * 16, 0, 0, 0, 0)\n"
+                "    draw_num(26, 0, cx, 2)\n"
+            )
+        else:
+            src = (
+                "px = 112\npy = 72\n\n"
+                "def on_init():\n"
+                "    clear_ui()\n"
+                "    draw_text(1, 0, 'KINOSCRIPT READY')\n\n"
+                "def on_frame():\n"
+                "    if key_held(BTN_RIGHT):\n        px = clamp(px + 2, 0, 224)\n"
+                "    if key_held(BTN_LEFT):\n        px = clamp(px - 2, 0, 224)\n"
+                "    if key_held(BTN_DOWN):\n        py = clamp(py + 2, 8, 144)\n"
+                "    if key_held(BTN_UP):\n        py = clamp(py - 2, 8, 144)\n"
+                "    if key_pressed(BTN_A):\n        play_sfx(0)\n"
+                "    set_sprite(0, px, py, 0, (frame_count() >> 3) & 1, 0, 0)\n"
+            )
+        self.ed_ks.setPlainText(src)
+        self.project.script_code = src
+        self.project.script_enabled = True
+        self.cb_ks_enable.setChecked(True)
+        self._validate_ks(silent=True)
+        self.projectModified.emit("Insert KinoScript Starter")
 
     def _on_start_var0_changed(self, v: int) -> None:
         if self.project:
@@ -1856,6 +2036,7 @@ class PlaytestBuildPage(QWidget):
             banner=self.sim.banner_msg, dialogue=self.sim.dialog_text,
             var0=self.sim.vars[0] if self.sim.vars else 0,
             minimap_rooms=mrooms,
+            script_mode=self.sim.is_script_mode(),
         )
 
     def _on_hw_flags_changed(self) -> None:

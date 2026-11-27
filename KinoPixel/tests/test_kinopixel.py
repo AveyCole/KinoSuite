@@ -627,18 +627,43 @@ def test_v3_universal_gba_engine() -> None:
         assert struct.unpack_from("<I", scpu.iwram, ST_PY)[0] < sy0, "Space Action 8-way flight must fly UP!"
 
         tact = create_starter_project("GBA Tactical Grid (Advance Ops)")
+        assert tact.script_enabled and tact.script_code.strip()
+        from kinopixel.kinoscript import validate_kinoscript
+        ok_ks, msg_ks, _ = validate_kinoscript(tact.script_code)
+        assert ok_ks, f"Advance Ops KinoScript failed validation: {msg_ks}"
         tact_rom = os.path.join(td, "advance_ops.gba")
-        compile_gba_rom(tact, tact_rom)
+        tact_rep = compile_gba_rom(tact, tact_rom)
         with open(tact_rom, "rb") as f:
             tcpu = MiniGbaCpu(f.read())
         tcpu.run_frames(3)
-        tx0 = struct.unpack_from("<I", tcpu.iwram, ST_PX)[0] >> 8
+        # Verify Cursor OAM[0] and 12 initial Blue+Red Units OAM[1..12] are live on GBA hardware!
+        ca0, ca1, _ = tcpu.oam_entry(0)
+        assert (ca0 & 0x0200) == 0, "Advance Ops Cursor OAM[0] must be visible!"
+        cx0 = ca1 & 0x1FF
+        for ui in range(1, 13):
+            ua0, _, _ = tcpu.oam_entry(ui)
+            assert (ua0 & 0x0200) == 0, f"Advance Ops Unit OAM[{ui}] should be visible!"
+        # Move cursor RIGHT -> steps 16px on tactical grid!
         tcpu.set_buttons(["RIGHT"])
         tcpu.run_frames(2)
-        tx1 = struct.unpack_from("<I", tcpu.iwram, ST_PX)[0] >> 8
-        assert tx1 == tx0 + 16, f"Tactical Grid mode must step exactly +16px, got {tx0} -> {tx1}"
+        _, ca1_r, _ = tcpu.oam_entry(0)
+        assert (ca1_r & 0x1FF) == cx0 + 16, f"Tactical cursor should move +16px, got {cx0} -> {ca1_r & 0x1FF}"
+        # Press START -> End Turn -> Autonomous Red AI Turn runs & advances DAY 1 -> DAY 2 + writes 'AW' to GBA SRAM!
+        tcpu.set_buttons([])
+        tcpu.run_frames(1)
+        tcpu.set_buttons(["START"])
+        tcpu.run_frames(2)
+        tcpu.set_buttons([])
+        tcpu.run_frames(90)  # Let Red AI think, move all 6 units, build, and pass to Day 2!
+        assert tcpu.sram[0:2] == b"AW" and tcpu.sram[2] == 2, f"Red AI turn must finish & save Day 2 to SRAM, got {tcpu.sram[0:3]!r}"
+        # Also verify live 60fps KinoScript simulator renders Advance Ops cleanly!
+        tsim = GamePlaytestEngine(tact)
+        tsim.step({"RIGHT"})
+        tsim.step({"A"})
+        trgb = tsim.render_rgb()
+        assert trgb.shape == (160, 240, 3)
 
-        print(f"    PASS! Executed {cpu.steps + rcpu.steps + scpu.steps + tcpu.steps:,} ARM7TDMI instructions across 4 distinct GBA genres!")
+        print(f"    PASS! Executed {cpu.steps + rcpu.steps + scpu.steps + tcpu.steps:,} ARM7TDMI instructions across 4 distinct GBA genres (incl. full KinoScript Advance Ops AI Turn!)")
 
 
 def test_project_roundtrip_and_undo() -> None:

@@ -876,6 +876,7 @@ class PlaytestScreenWidget(QWidget):
         self.hud_info: Tuple[int, int, int, bool, bool] = (5, 0, 0, False, False)
         self.extra_hud: Tuple[int, int, str, str, int] = (0, 0, "", "", 0)  # room_idx, boss_hp, banner, dialogue, var0
         self.minimap_data: Tuple[List[Tuple[int, int, int]], int] = ([], 0)  # [(idx, wx, wy), ...], active_idx
+        self.script_mode: bool = False
         self.lcd_grid: bool = True
         self.pressed_keys: Set[str] = set()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -885,6 +886,7 @@ class PlaytestScreenWidget(QWidget):
         self, rgb: np.ndarray, hp: int, coins: int, score: int, paused: bool, won: bool,
         room_idx: int = 0, boss_hp: int = 0, banner: str = "", dialogue: str = "",
         var0: int = 0, minimap_rooms: Optional[List[Tuple[int, int, int]]] = None,
+        script_mode: bool = False,
     ) -> None:
         h, w, _ = rgb.shape
         contiguous = np.ascontiguousarray(rgb)
@@ -892,6 +894,7 @@ class PlaytestScreenWidget(QWidget):
         self.hud_info = (hp, coins, score, paused, won)
         self.extra_hud = (room_idx, boss_hp, banner, dialogue, var0)
         self.minimap_data = (minimap_rooms or [], room_idx)
+        self.script_mode = script_mode
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -945,7 +948,15 @@ class PlaytestScreenWidget(QWidget):
                 for x in range(ox, ox + dw, scale):
                     p.drawLine(x, oy, x, oy + dh)
 
-        # Crisp HUD overlay matching hardware BG1 HUD
+        # Crisp HUD overlay matching hardware BG1 HUD (skipped in KinoScript mode since script owns BG1!)
+        if self.script_mode:
+            room_idx, boss_hp, banner, dialogue, var0 = self.extra_hud
+            if banner:
+                p.setFont(QFont("Consolas", max(8, 3 * scale), QFont.Weight.Bold))
+                p.setPen(QColor("#F43F5E"))
+                p.drawText(ox + 8, oy + dh - 8, banner)
+            p.end()
+            return
         hp, coins, score, paused, won = self.hud_info
         room_idx, boss_hp, banner, dialogue, var0 = self.extra_hud
         p.setFont(QFont("Consolas", max(9, 4 * scale), QFont.Weight.Bold))
