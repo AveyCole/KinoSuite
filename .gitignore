@@ -1,0 +1,23 @@
+# Python & Build Artifacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.log
+
+# Compiled Windows Binaries (rebuild locally via build_launcher.ps1 / build_exe.py)
+*.exe
+
+# Local Studio User Data & Cloud Caches
+.kinosuite_hub/
+.kinocloud/
+.kinocloud_wave/
+.kinoconfig/
+.kinowave_config/
+.kinofill_data/
+.kinopixel_config/
+
+# Keep KinoPixel starter playable ROM & project
+!KinoPixel/examples/*.gba
+!KinoPixel/examples/*.kpx

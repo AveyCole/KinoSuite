@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec
+*.exe
+.kinopixel_config/
+*.gba
+*.gb
+*.gbc
+!examples/*.gba
+!examples/*.kpx
