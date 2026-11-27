@@ -99,7 +99,7 @@ BUILTIN_APP_SPECS: List[Dict[str, Any]] = [
         "bg_hex": "#1E150C",
         "exe_candidates": [os.path.join("KinoDraw", "KinoDraw.exe"), "KinoDraw.exe"],
         "folder_rel": "KinoDraw",
-        "extensions": [".kdraw", ".svg", ".eps", ".ai"],
+        "extensions": [".kdraw", ".kdrw", ".svg", ".eps", ".ai"],
         "cloud_rel": [os.path.join("KinoDraw", ".kinocloud")],
         "plugin_rel": [os.path.join("KinoDraw", "plugins")],
     },
@@ -127,7 +127,7 @@ BUILTIN_APP_SPECS: List[Dict[str, Any]] = [
         "bg_hex": "#0E1929",
         "exe_candidates": [os.path.join("KinoFill", "KinoFill.exe"), "KinoFill.exe"],
         "folder_rel": "KinoFill",
-        "extensions": [".pdf", ".fdf", ".xfdf"],
+        "extensions": [".pdf", ".kinofill", ".freefill", ".lfill", ".fdf", ".xfdf"],
         "cloud_rel": [os.path.join("KinoFill", ".kinofill_data")],
         "plugin_rel": [],
     },
@@ -265,6 +265,24 @@ def route_file_to_app(file_path: str, apps: List[KinoAppInfo]) -> Optional[KinoA
     return None
 
 
+def portal_inbox() -> str:
+    return os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "KinoSuite", "Portal Inbox")
+
+
+def portal_targets(file_path: str, apps: List[KinoAppInfo]) -> List[KinoAppInfo]:
+    ext = os.path.splitext(file_path)[1].lower()
+    raster = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    formats = {
+        "kinocut": {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".ts", ".wav", ".mp3", ".flac", ".m4a", ".png", ".gif"},
+        "kinoshop": raster | {".ksd", ".tif", ".tiff", ".psd", ".gif"},
+        "kinodraw": raster | {".svg", ".kdrw", ".kdraw"},
+        "kinowave": {".kwp", ".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aiff", ".aif", ".wma", ".ac3", ".amr", ".mid", ".midi"},
+        "kinofill": {".pdf", ".kinofill", ".freefill", ".lfill"},
+        "kinopixel": raster | {".kpx"},
+    }
+    return [app for app in apps if not app.is_custom and app.installed and ext in formats.get(app.app_id, ())]
+
+
 def find_python_executable(windowed: bool = False) -> str:
     exe_name = "pythonw.exe" if windowed else "python.exe"
     if not getattr(sys, "frozen", False):
@@ -283,6 +301,8 @@ def find_python_executable(windowed: bool = False) -> str:
 def launch_kino_app(app: KinoAppInfo, file_args: Optional[List[str]] = None) -> subprocess.Popen:
     """Launch a KinoSuite application (preferring its native .exe, falling back to main.py)."""
     args = [a for a in (file_args or []) if a]
+    if app.app_id == "kinocut" and args:
+        args.insert(0,"--import-media")
     if app.exe_path and os.path.isfile(app.exe_path):
         cmd = [app.exe_path] + args
         cwd = os.path.dirname(app.exe_path)

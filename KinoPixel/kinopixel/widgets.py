@@ -575,13 +575,16 @@ class LevelMapCanvasWidget(QWidget):
         p.setPen(QColor("#34D399"))
         p.drawText(sp_r.adjusted(2, -12, 20, 0), Qt.AlignmentFlag.AlignLeft, "SPAWN")
 
-        # Draw Placed Enemies + patrol bounds
+        # Draw Placed Enemies + patrol bounds (supports 16x16 & 32x32 bosses!)
         for en in lvl.entities:
             sp_idx = en.sprite_index if en.sprite_index < len(self.project.sprites) else 0
+            sw_tiles, sh_tiles = 2, 2
             if sp_idx < len(self.project.sprites) and self.project.sprites[sp_idx].frames:
+                sp = self.project.sprites[sp_idx]
+                sw_tiles, sh_tiles = max(2, sp.width // 8), max(2, sp.height // 8)
                 epm = render_grid_pixmap(
-                    self.project.sprites[sp_idx].frames[0],
-                    self.project.get_palette_colors(self.project.sprites[sp_idx].palette_index),
+                    sp.frames[0],
+                    self.project.get_palette_colors(sp.palette_index),
                     scale=self.zoom,
                 )
                 p.drawPixmap(en.tile_x * ts, en.tile_y * ts, epm)
@@ -589,11 +592,20 @@ class LevelMapCanvasWidget(QWidget):
             p.drawLine(
                 max(0, (en.tile_x - en.patrol_range) * ts),
                 en.tile_y * ts + ts,
-                min(lvl.width * ts, (en.tile_x + en.patrol_range + 2) * ts),
+                min(lvl.width * ts, (en.tile_x + en.patrol_range + sw_tiles) * ts),
                 en.tile_y * ts + ts,
             )
-            p.setPen(QPen(QColor("#F43F5E"), 2))
-            p.drawRect(en.tile_x * ts, en.tile_y * ts, ts * 2, ts * 2)
+            p.setPen(QPen(QColor("#F59E0B") if en.ai_type == 3 else QColor("#F43F5E"), 2))
+            p.drawRect(en.tile_x * ts, en.tile_y * ts, ts * sw_tiles, ts * sh_tiles)
+
+        # Draw Linked Room Doors
+        for dr in lvl.doors:
+            dr_r = QRect(dr.tile_x * ts, dr.tile_y * ts, ts, ts)
+            p.setPen(QPen(QColor("#22D3EE"), 2))
+            p.drawRect(dr_r)
+            p.setFont(QFont("Segoe UI", 6.5, QFont.Weight.Bold))
+            p.setPen(QColor("#22D3EE"))
+            p.drawText(dr_r.adjusted(-4, -12, 24, 0), Qt.AlignmentFlag.AlignLeft, f"→R{dr.target_room + 1}")
 
         # Draw Hardware Viewport Guide (240x160 GBA or 160x144 GB/GBC)
         if self.show_viewport:
@@ -853,17 +865,22 @@ class PlaytestScreenWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._frame_img: Optional[QImage] = None
-        self.hud_info: Tuple[int, int, int, bool, bool] = (3, 0, 0, False, False)
+        self.hud_info: Tuple[int, int, int, bool, bool] = (5, 0, 0, False, False)
+        self.extra_hud: Tuple[int, int, str, str] = (0, 0, "", "")  # room_idx, boss_hp, banner, dialogue
         self.lcd_grid: bool = True
         self.pressed_keys: Set[str] = set()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(480, 320)
 
-    def set_frame(self, rgb: np.ndarray, hp: int, coins: int, score: int, paused: bool, won: bool) -> None:
+    def set_frame(
+        self, rgb: np.ndarray, hp: int, coins: int, score: int, paused: bool, won: bool,
+        room_idx: int = 0, boss_hp: int = 0, banner: str = "", dialogue: str = "",
+    ) -> None:
         h, w, _ = rgb.shape
         contiguous = np.ascontiguousarray(rgb)
         self._frame_img = QImage(contiguous.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
         self.hud_info = (hp, coins, score, paused, won)
+        self.extra_hud = (room_idx, boss_hp, banner, dialogue)
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -919,13 +936,30 @@ class PlaytestScreenWidget(QWidget):
 
         # Crisp HUD overlay matching hardware BG1 HUD
         hp, coins, score, paused, won = self.hud_info
+        room_idx, boss_hp, banner, dialogue = self.extra_hud
         p.setFont(QFont("Consolas", max(9, 4 * scale), QFont.Weight.Bold))
         p.setPen(QColor("#F43F5E"))
         p.drawText(ox + 8, oy + 4 * scale + 10, "♥" * max(0, hp))
         p.setPen(QColor("#FDE047"))
-        p.drawText(ox + 72, oy + 4 * scale + 10, f"★{coins:02d}")
+        p.drawText(ox + 92, oy + 4 * scale + 10, f"★{coins:02d}  R{room_idx + 1}")
         p.setPen(QColor("#F8FAFC"))
         p.drawText(ox + dw - 125, oy + 4 * scale + 10, f"PTS {score:04d}")
+
+        if boss_hp > 0:
+            p.setPen(QColor("#34D399"))
+            p.drawText(ox + dw // 2 - 48, oy + 4 * scale + 10, f"BOSS {'█' * min(8, (boss_hp + 1) // 2)}")
+        elif banner:
+            p.setPen(QColor("#38BDF8"))
+            p.drawText(ox + dw // 2 - 64, oy + 4 * scale + 10, banner)
+
+        if dialogue:
+            box = QRect(ox + 16, oy + dh - 64, dw - 32, 52)
+            p.fillRect(box, QColor(13, 19, 34, 235))
+            p.setPen(QPen(QColor("#38BDF8"), 2))
+            p.drawRect(box)
+            p.setPen(QColor("#F8FAFC"))
+            p.setFont(QFont("Consolas", max(8, 3 * scale), QFont.Weight.Bold))
+            p.drawText(box.adjusted(8, 6, -8, -6), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, f"{dialogue}\n[Press A / Z to continue]")
 
         if won:
             p.fillRect(QRect(ox + dw // 6, oy + dh // 2 - 26, dw * 2 // 3, 52), QColor(14, 17, 26, 220))

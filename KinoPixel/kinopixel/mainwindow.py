@@ -6,7 +6,7 @@ import sys
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QColor, QIcon, QImageReader, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .audio_sfx import ChiptuneAudioPlayer
 from .icons import make_app_pixmap, make_icon
-from .models import KinoPixelProject
+from .models import KinoPixelProject, SpriteAsset
 from .sample_project import create_starter_project
 from .studio_pages import (
     ButtonWiringPage,
@@ -71,6 +71,9 @@ class KinoPixelWindow(QMainWindow):
             for fp in initial_files:
                 if os.path.isfile(fp) and fp.lower().endswith(".kpx"):
                     self.open_path(fp)
+                    opened = True
+                elif os.path.isfile(fp) and os.path.splitext(fp)[1].lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+                    self.open_sprite_image(fp)
                     opened = True
         if not opened:
             if load_starter:
@@ -287,7 +290,7 @@ class KinoPixelWindow(QMainWindow):
 
         m_file = mb.addMenu("&File")
         m_tpl = m_file.addMenu("New from Starter Template")
-        for tpl in ["GBA Platformer", "GBA Top-Down RPG", "GBC Adventure", "GB Classic (DMG)"]:
+        for tpl in ["GBA Metroidvania (BSL Sector)", "GBA Platformer", "GBA Top-Down RPG", "GBC Adventure", "GB Classic (DMG)"]:
             m_tpl.addAction(tpl, lambda _=False, t=tpl: self._add_project_tab(create_starter_project(t)))
         m_file.addAction(self._act("Open Project (.kpx)...", self.open_file_dialog, "Ctrl+O"))
         m_file.addAction(self._act("Save Project", self.save_project, "Ctrl+S"))
@@ -448,7 +451,7 @@ class KinoPixelWindow(QMainWindow):
 
     def new_project_dialog(self) -> None:
         from PySide6.QtWidgets import QInputDialog
-        tpls = ["GBA Platformer", "GBA Top-Down RPG", "GBC Adventure", "GB Classic (DMG)"]
+        tpls = ["GBA Metroidvania (BSL Sector)", "GBA Platformer", "GBA Top-Down RPG", "GBC Adventure", "GB Classic (DMG)"]
         choice, ok = QInputDialog.getItem(self, "New KinoPixel Game", "Choose Starter Template:", tpls, 0, False)
         if ok and choice:
             self._add_project_tab(create_starter_project(choice))
@@ -457,6 +460,36 @@ class KinoPixelWindow(QMainWindow):
         fp, _ = QFileDialog.getOpenFileName(self, "Open KinoPixel Project", "", "KinoPixel Project (*.kpx)")
         if fp:
             self.open_path(fp)
+
+    def open_sprite_image(self, path: str) -> None:
+        reader = QImageReader(path)
+        size = reader.size()
+        if not size.isValid():
+            QMessageBox.warning(self,"Open Sprite",reader.errorString())
+            return
+        size.scale(32,32,Qt.AspectRatioMode.KeepAspectRatio)
+        reader.setScaledSize(size)
+        image = reader.read()
+        if image.isNull():
+            QMessageBox.warning(self,"Open Sprite",reader.errorString())
+            return
+        proj = self.current_project()
+        if proj is None:
+            proj = create_starter_project("GBA Platformer")
+            self._add_project_tab(proj)
+        palette = [QColor(value).getRgb()[:3] for value in proj.get_palette_colors(0)[:proj.active_palette_size()]]
+        pixels = []
+        for y in range(image.height()):
+            row = []
+            for x in range(image.width()):
+                red,green,blue,alpha = image.pixelColor(x,y).getRgb()
+                index = min(range(1,len(palette)),key=lambda i: sum((a-b)**2 for a,b in zip((red,green,blue),palette[i]))) if alpha >= 128 else 0
+                row.append(index)
+            pixels.append(row)
+        proj.sprites.append(SpriteAsset(name=os.path.splitext(os.path.basename(path))[0], role="prop",
+                                       width=image.width(),height=image.height(),frames=[pixels]))
+        self._bind_project_to_pages(proj)
+        self.lbl_status_info.setText(f"Imported sprite from {os.path.basename(path)}")
 
     def open_path(self, fp: str) -> None:
         try:

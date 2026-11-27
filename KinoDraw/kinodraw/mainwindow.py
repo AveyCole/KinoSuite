@@ -1282,6 +1282,12 @@ class KinoDrawWindow(QMainWindow):
                     doc.add_object(o)
                 doc.dirty = False
                 self.add_document_tab(doc)
+            elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+                doc = create_blank_document(name=os.path.basename(path))
+                artboard = doc.active_artboard()
+                doc.add_object(create_placed_image_object(path,artboard.x+60,artboard.y+60,embed=True))
+                doc.dirty = True
+                self.add_document_tab(doc)
             else:
                 doc = Document.load_from_file(path)
                 self.add_document_tab(doc)

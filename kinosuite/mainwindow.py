@@ -51,6 +51,7 @@ from .registry import (
     launch_kino_app,
     query_running_kino_processes,
     route_file_to_app,
+    portal_inbox,
     terminate_process,
 )
 from .theme import KINOSUITE_HUB_DARK, KINOSUITE_HUB_LIGHT
@@ -482,6 +483,14 @@ class KinoSuiteHubWindow(QMainWindow):
         b_suite_dir.clicked.connect(lambda: self._open_in_explorer(self.suite_root))
         hdr_row.addWidget(b_reg)
         hdr_row.addWidget(b_suite_dir)
+        portal = os.path.join(self.suite_root,"KinoPortal.exe")
+        if os.path.isfile(portal):
+            b_portal = QPushButton("KinoPortal")
+            b_portal.clicked.connect(lambda: self._launch_portal(portal))
+            hdr_row.addWidget(b_portal)
+        b_inbox = QPushButton("Portal Inbox")
+        b_inbox.clicked.connect(self._open_portal_inbox)
+        hdr_row.addWidget(b_inbox)
         lay.addLayout(hdr_row)
 
         drop = FileDropZone()
@@ -861,6 +870,20 @@ class KinoSuiteHubWindow(QMainWindow):
             self.launch_app_by_id(app_id, [fp])
             self._all_projects = collect_suite_projects(self.apps, self.cfg)
             self._render_projects_table()
+
+    def _launch_portal(self, executable: str) -> None:
+        try:
+            subprocess.Popen([executable],cwd=self.suite_root)
+        except OSError as error:
+            QMessageBox.warning(self,"KinoPortal",str(error))
+
+    def _open_portal_inbox(self) -> None:
+        try:
+            inbox = portal_inbox()
+            os.makedirs(inbox,exist_ok=True)
+            self._open_in_explorer(inbox)
+        except OSError as error:
+            QMessageBox.warning(self,"Portal Inbox",str(error))
 
     def _browse_any_file(self) -> None:
         fp, _ = QFileDialog.getOpenFileName(self, "Open Any Creative File in KinoSuite", "", "All Files (*.*)")

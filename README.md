@@ -11,7 +11,7 @@
 | **`Kd`** | **KinoDraw** | Vector & Graphics | Precision Bezier vector illustration, artboards, typography, image trace & SVG |
 | **`Kw`** | **KinoWave** | Audio & Mastering | 32-bit float multitrack audio studio, 46+ DSP FX, spectrogram, MIDI & VST3/VST2 host |
 | **`Kf`** | **KinoFill** | PDF & Documents | PDF editing, interactive form filling, e-signatures, OCR, redaction & merging |
-| **`Kp`** | **KinoPixel** | Retro Games (GB/GBC/GBA) | From-scratch sprite & animation editor, 8×8 tile & 64×32 level editor, visual button wiring, **Sequence Genie** chiptune composer (19 scales, Chord Genie, Euclidean drums), live 60 FPS playtester & zero-toolchain ARM7TDMI playable `.gba` / `.gb` / `.gbc` ROM compiler |
+| **`Kp`** | **KinoPixel v2.0** | Retro Games (GB/GBC/GBA) | Full Metroidvania & retro handheld game studio — `16×16`/`16×32`/`32×32` metasprites, Morph Ball, 8-way aim, Wall-Jump, multi-room doors, GBA SRAM saves, BG2 parallax + alpha blend, **Sequence Genie** chiptune composer, Direct Sound DMA PCM & playable `.gba`/`.gb`/`.gbc` ROMs |
 
 ## Prebuilt Windows Downloads (No Python Required)
 
@@ -23,8 +23,9 @@ Download ready-to-run standalone Windows `.exe` executables directly from [**Git
 - **`KinoDraw.exe`** — Vector Illustration Studio
 - **`KinoWave.exe`** — Multitrack Audio & VST3/VST2 Studio
 - **`KinoFill.exe`** — PDF Editor & Form Studio
-- **`KinoPixel.exe`** — GB/GBC/GBA Game Studio with Sequence Genie & `.gba` ROM Compiler
-- **`starbit_quest.gba`** — Ready-to-play GBA ROM built with KinoPixel
+- **`KinoPixel.exe`** — GB/GBC/GBA Metroidvania Game Studio v2.0 with Sequence Genie & `.gba` ROM Compiler
+- **`bsl_fusion.gba`** — Playable 3-room Metroidvania GBA ROM (16×32 Hero, Morph Ball, SRAM, BG2 Parallax, Omega Core Boss, DMA Audio)
+- **`starbit_quest.gba`** — Playable GBA Platformer ROM built with KinoPixel
 
 ## Quick Start (From Source)
 

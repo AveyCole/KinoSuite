@@ -40,6 +40,7 @@ class MiniGbaCpu:
         self.pal = bytearray(0x400)
         self.vram = bytearray(96 * 1024)
         self.oam = bytearray(0x400)
+        self.sram = bytearray(32 * 1024)
         self.regs = [0] * 16
         self.regs[15] = 0x08000000
         self.cpsr_n = 0
@@ -52,6 +53,7 @@ class MiniGbaCpu:
         self.sfx1_triggers = 0
         self.sfx2_triggers = 0
         self.sfx4_triggers = 0
+        self.dma1_triggers = 0
         self.steps = 0
 
     def set_buttons(self, pressed_names: list[str]) -> None:
@@ -79,6 +81,8 @@ class MiniGbaCpu:
             return self.oam, addr & 0x3FF, "OAM"
         if hi == 0x08:
             return self.rom, addr - 0x08000000, "ROM"
+        if hi == 0x0E:
+            return self.sram, addr & 0x7FFF, "SRAM"
         raise RuntimeError(f"Unmapped GBA memory access at 0x{addr:08X} (PC=0x{self.regs[15]:08X})")
 
     def read8(self, addr: int) -> int:
@@ -117,6 +121,8 @@ class MiniGbaCpu:
             self.sfx2_triggers += 1
         if addr == 0x0400007C and (val & 0x8000):
             self.sfx4_triggers += 1
+        if addr == 0x040000C6 and (val & 0x8000):
+            self.dma1_triggers += 1
         mem, off, name = self._region(addr)
         if name == "ROM":
             raise AssertionError(f"Write to ROM at 0x{addr:08X}")
@@ -360,7 +366,7 @@ class MiniGbaCpu:
 
         raise RuntimeError(f"Unhandled ARM instruction 0x{insn:08X} at 0x{pc:08X}")
 
-    def run_frames(self, count: int, max_steps_per_frame: int = 80000) -> None:
+    def run_frames(self, count: int, max_steps_per_frame: int = 200000) -> None:
         for _ in range(count):
             start_frame = struct.unpack_from("<I", self.iwram, 0x58)[0]
             for _ in range(max_steps_per_frame):
@@ -370,7 +376,7 @@ class MiniGbaCpu:
                     # Finish the rest of this frame until next VBlank wait
                     for _ in range(12000):
                         self.step()
-                        if self.read16(0x04000000) == 0x1340 and self.vcount == 0 and self.steps % 5 == 0:
+                        if self.read16(0x04000000) in (0x1340, 0x1740) and self.vcount == 0 and self.steps % 5 == 0:
                             break
                     break
             else:
@@ -400,15 +406,20 @@ def test_gba_rom_hardware_execution() -> None:
         cpu.set_buttons([])
         cpu.run_frames(6)
 
-        # Verify hardware display & sound initialized
+        # Verify hardware display & sound initialized (v2.0 Mode 0 + BG0 + BG1 + BG2 + OBJ = 0x1740)
         dispcnt = struct.unpack_from("<H", cpu.io, 0x00)[0]
         bg0cnt = struct.unpack_from("<H", cpu.io, 0x08)[0]
         bg1cnt = struct.unpack_from("<H", cpu.io, 0x0A)[0]
+        bg2cnt = struct.unpack_from("<H", cpu.io, 0x0C)[0]
+        bldcnt = struct.unpack_from("<H", cpu.io, 0x50)[0]
         sndx = struct.unpack_from("<H", cpu.io, 0x84)[0]
-        assert dispcnt == 0x1340, f"Unexpected REG_DISPCNT: 0x{dispcnt:04X}"
+        assert dispcnt == 0x1740, f"Unexpected REG_DISPCNT: 0x{dispcnt:04X}"
         assert bg0cnt == 0x5C01, f"Unexpected REG_BG0CNT: 0x{bg0cnt:04X}"
         assert bg1cnt == 0x1E04, f"Unexpected REG_BG1CNT: 0x{bg1cnt:04X}"
+        assert bg2cnt == 0x1A02, f"Unexpected REG_BG2CNT: 0x{bg2cnt:04X}"
+        assert bldcnt == 0x2044, f"Unexpected REG_BLDCNT: 0x{bldcnt:04X}"
         assert sndx == 0x0080, f"Unexpected REG_SOUNDCNT_X: 0x{sndx:04X}"
+        assert b"SRAM_V113" in rom, "Official GBA SRAM_V113 identifier missing!"
 
         # Hero OAM[0] visible & standing on ground
         a0_0, a1_0, a2_0 = cpu.oam_entry(0)
@@ -470,6 +481,82 @@ def test_gba_rom_hardware_execution() -> None:
         c_hdr = export_c_source(proj, td)
         assert os.path.isfile(c_hdr)
         print(f"    PASS! Executed {cpu.steps:,} ARM7TDMI instructions cleanly (ROM {rep.rom_size // 1024} KB, Checksum {rep.checksum_hex})")
+
+
+def test_metroidvania_v2_gba_hardware() -> None:
+    print("[1b/6] Verifying BSL Fusion Metroidvania ROM (16x32 Hero, Morph, 8-Way Aim, Doors, SRAM, Boss, DMA, Dialogue)...")
+    from kinopixel.gba_compiler import ST_ABILITIES, ST_DIALOG_ON, ST_MORPHED, ST_PROJS, ST_PX, ST_PY, ST_ROOM_IDX
+    proj = create_starter_project("GBA Metroidvania (BSL Sector)")
+    assert len(proj.rooms) == 3
+    with tempfile.TemporaryDirectory() as td:
+        rom_path = os.path.join(td, "bsl_fusion.gba")
+        rep = compile_gba_rom(proj, rom_path)
+        assert rep.rooms_compiled == 3
+        with open(rom_path, "rb") as f:
+            rom = f.read()
+
+        cpu = MiniGbaCpu(rom)
+        cpu.set_buttons([])
+        cpu.run_frames(5)
+
+        # 1. Verify 16x32 Tall Hero Metasprite OAM attributes
+        a0, a1, _ = cpu.oam_entry(0)
+        assert (a0 & 0x8000) == 0x8000 and (a1 & 0x8000) == 0x8000, f"Expected 16x32 tall hero OAM, got 0x{a0:04X}/0x{a1:04X}"
+
+        # 2. Walk right into Adam Navigation Terminal -> triggers BG1 Dialogue Box!
+        cpu.set_buttons(["RIGHT"])
+        cpu.run_frames(22)
+        dlg_on = struct.unpack_from("<I", cpu.iwram, ST_DIALOG_ON)[0]
+        assert dlg_on == 1, "Stepping on Navigation Terminal must open BG1 dialogue box!"
+        # Dismiss dialogue with A!
+        cpu.set_buttons(["A"])
+        cpu.run_frames(2)
+        assert struct.unpack_from("<I", cpu.iwram, ST_DIALOG_ON)[0] == 0, "Pressing A must dismiss dialogue!"
+
+        # 3. Walk right into Save Station -> writes checksummed 'KPS2' block into GBA Cartridge SRAM 0x0E000000!
+        cpu.set_buttons(["RIGHT"])
+        cpu.run_frames(42)
+        assert cpu.sram[0:4] == b"KPS2", f"Save Station must write KPS2 SRAM magic, got {cpu.sram[0:4]!r}"
+        saved_sram = bytes(cpu.sram)
+
+        # 4. Test 8-way / upward Arm Cannon aim (hold L + press B -> projectile vy < 0!)
+        cpu.set_buttons(["L", "B"])
+        cpu.run_frames(2)
+        p_vy_flags = struct.unpack_from("<I", cpu.iwram, ST_PROJS + 16)[0]
+        p_vy = p_vy_flags & 0xFFFF
+        if p_vy & 0x8000:
+            p_vy -= 0x10000
+        assert p_vy < 0, f"Holding L + B should fire upward Arm Cannon shot (vy < 0), got vy={p_vy}"
+
+        # 5. Grant Morph Ball ability -> press SELECT -> hero shrinks to 16x16 Morph Ball OAM!
+        struct.pack_into("<I", cpu.iwram, ST_ABILITIES, 0x03)
+        cpu.set_buttons(["SELECT"])
+        cpu.run_frames(2)
+        assert struct.unpack_from("<I", cpu.iwram, ST_MORPHED)[0] == 1, "SELECT should activate Morph Ball!"
+        a0_m, a1_m, _ = cpu.oam_entry(0)
+        assert (a0_m & 0x8000) == 0 and (a1_m & 0xC000) == 0x4000, "Morphed hero must switch OAM to 16x16 Morph Ball!"
+
+        # 6. Teleport right into East Hatch (tile_x=42 -> hero left edge 41*8 so center x+8 lands on col 42!) -> warps to Room 1!
+        struct.pack_into("<I", cpu.iwram, ST_PX, (41 * 8) << 8)
+        struct.pack_into("<I", cpu.iwram, ST_PY, (16 * 8) << 8)
+        cpu.set_buttons([])
+        cpu.run_frames(2)
+        assert struct.unpack_from("<I", cpu.iwram, ST_ROOM_IDX)[0] == 1, "Entering East Hatch must warp to Room 1!"
+
+        # 7. Reboot fresh GBA CPU with persisted SRAM -> auto-restores saved KPS2 game!
+        cpu2 = MiniGbaCpu(rom)
+        cpu2.sram[:] = saved_sram
+        cpu2.run_frames(3)
+        assert struct.unpack_from("<I", cpu2.iwram, ST_PX)[0] > (4 * 8) << 8, "Rebooting with valid SRAM should restore saved position!"
+
+        # 8. Test live playtester through all 3 rooms & Direct Sound DMA callback!
+        dma_fired = []
+        sim = GamePlaytestEngine(proj, on_dma=lambda: dma_fired.append(1))
+        sim.load_room(2)  # Boss Chamber
+        assert any(e.is_32 and e.hp == 12 for e in sim.enemies)
+        rgb = sim.render_rgb()
+        assert rgb.shape == (160, 240, 3)
+        print(f"    PASS! Executed {cpu.steps:,} ARM7TDMI Metroidvania instructions (ROM {rep.rom_size // 1024} KB, 3 Rooms, SRAM + BG2 + DMA + Boss)")
 
 
 def test_project_roundtrip_and_undo() -> None:
@@ -571,8 +658,9 @@ def test_headless_studio_ui() -> None:
 
 if __name__ == "__main__":
     test_gba_rom_hardware_execution()
+    test_metroidvania_v2_gba_hardware()
     test_project_roundtrip_and_undo()
     test_chiptune_synth()
     test_live_playtest_engine()
     test_headless_studio_ui()
-    print("\nALL KINOPIXEL TESTS PASSED!")
+    print("\nALL KINOPIXEL v2.0 TESTS PASSED!")

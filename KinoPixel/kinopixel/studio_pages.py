@@ -39,14 +39,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .audio_sfx import ChiptuneAudioPlayer, synthesize_sfx_waveform
+from .audio_sfx import ChiptuneAudioPlayer, DIRECT_SOUND_PRESETS, synthesize_sfx_waveform
 from .gba_compiler import BuildReport, compile_gb_rom, compile_gba_rom, export_c_source
 from .genie_widget import SequenceGeniePanel
 from .icons import make_icon
 from .models import (
+    ABILITY_NAMES,
+    ACTION_AIM_UP,
+    ACTION_BOMB,
     ACTION_DASH,
     ACTION_JUMP,
     ACTION_MELEE,
+    ACTION_MORPH_BALL,
     ACTION_MOVE_DOWN,
     ACTION_MOVE_LEFT,
     ACTION_MOVE_RIGHT,
@@ -56,11 +60,16 @@ from .models import (
     ACTION_PAUSE,
     ACTION_RESET_LEVEL,
     ACTION_SHOOT,
+    AI_BOSS,
+    AI_TYPE_NAMES,
     AnimationClip,
     BUTTON_ORDER,
     ButtonRule,
+    DoorLink,
     KinoPixelProject,
+    LevelMap,
     PRESET_PALETTES,
+    SPRITE_SIZES,
     SfxPatch,
     SpriteAsset,
     TILE_SOLID,
@@ -118,12 +127,12 @@ class SpriteEditorPage(QWidget):
         ll.setContentsMargins(8, 8, 8, 8)
         ll.setSpacing(6)
 
-        h1 = QLabel("SPRITE ASSETS (16×16)")
+        h1 = QLabel("METASPRITES (16×16 / 16×32 / 32×32)")
         h1.setObjectName("SectionHeader")
         ll.addWidget(h1)
 
         self.lst_sprites = QListWidget()
-        self.lst_sprites.setMaximumHeight(160)
+        self.lst_sprites.setMaximumHeight(145)
         self.lst_sprites.currentRowChanged.connect(self._on_sprite_selected)
         ll.addWidget(self.lst_sprites)
 
@@ -135,6 +144,16 @@ class SpriteEditorPage(QWidget):
         sp_btns.addWidget(b_add_sp)
         sp_btns.addWidget(b_dup_sp)
         ll.addLayout(sp_btns)
+
+        sz_row = QHBoxLayout()
+        sz_row.addWidget(QLabel("Size:"))
+        self.cmb_sp_size = QComboBox()
+        for sw, sh in SPRITE_SIZES:
+            tag = "Tall Hero" if (sw == 16 and sh == 32) else ("Boss" if sw == 32 else "Standard")
+            self.cmb_sp_size.addItem(f"{sw}×{sh} ({tag})", (sw, sh))
+        self.cmb_sp_size.currentIndexChanged.connect(self._on_sprite_size_changed)
+        sz_row.addWidget(self.cmb_sp_size, 1)
+        ll.addLayout(sz_row)
 
         h2 = QLabel("HARDWARE PALETTE (BGR555)")
         h2.setObjectName("SectionHeader")
@@ -353,6 +372,11 @@ class SpriteEditorPage(QWidget):
         sp = self._cur_sprite()
         if sp:
             self.cmb_pal_slot.setCurrentIndex(sp.palette_index % max(1, len(self.project.palettes)))
+            self.cmb_sp_size.blockSignals(True)
+            si = self.cmb_sp_size.findData((sp.width, sp.height))
+            if si >= 0:
+                self.cmb_sp_size.setCurrentIndex(si)
+            self.cmb_sp_size.blockSignals(False)
         self.cmb_pal_slot.blockSignals(False)
 
         self._refresh_clips_and_frames()
@@ -493,6 +517,15 @@ class SpriteEditorPage(QWidget):
             self._sync_canvas()
             self._refresh_thumbnails()
             self.projectModified.emit("Change Sprite Palette")
+
+    def _on_sprite_size_changed(self) -> None:
+        sp = self._cur_sprite()
+        data = self.cmb_sp_size.currentData()
+        if sp and data and (sp.width, sp.height) != tuple(data):
+            sp.resize_frames(data[0], data[1])
+            self._sync_canvas()
+            self._refresh_thumbnails()
+            self.projectModified.emit(f"Resize Metasprite ({data[0]}×{data[1]})")
 
     def _apply_preset_palette(self) -> None:
         if not self.project:
@@ -709,9 +742,47 @@ class LevelEditorPage(QWidget):
         ll.addStretch(1)
         root.addWidget(left)
 
-        # Right / Center: Level Toolbar + Scrollable Map Canvas
+        # Right / Center: Multi-Room World Bar + Level Toolbar + Scrollable Map Canvas
         right = QVBoxLayout()
         right.setSpacing(6)
+
+        # Multi-Room World & Metroidvania Bar
+        wbar = QWidget()
+        wbar.setObjectName("CardFrame")
+        wl = QHBoxLayout(wbar)
+        wl.setContentsMargins(8, 5, 8, 5)
+        wl.setSpacing(6)
+        wl.addWidget(QLabel("Room:"))
+        self.cmb_room = QComboBox()
+        self.cmb_room.setMinimumWidth(160)
+        self.cmb_room.currentIndexChanged.connect(self._on_room_selected)
+        wl.addWidget(self.cmb_room)
+        b_add_rm = QPushButton("+ Room")
+        b_add_rm.clicked.connect(self._add_room)
+        wl.addWidget(b_add_rm)
+        b_door = QPushButton("+ Link Door")
+        b_door.clicked.connect(self._link_door_dialog)
+        wl.addWidget(b_door)
+
+        wl.addWidget(QLabel("Upgrade:"))
+        self.cmb_upg = QComboBox()
+        for k, v in ABILITY_NAMES.items():
+            self.cmb_upg.addItem(v, k)
+        self.cmb_upg.currentIndexChanged.connect(self._on_room_meta_changed)
+        wl.addWidget(self.cmb_upg)
+
+        self.cb_par = QCheckBox("BG2 Parallax")
+        self.cb_par.setChecked(True)
+        self.cb_par.toggled.connect(self._on_room_meta_changed)
+        wl.addWidget(self.cb_par)
+
+        wl.addWidget(QLabel("Nav Text:"))
+        self.ed_dlg = QLineEdit()
+        self.ed_dlg.setMaxLength(48)
+        self.ed_dlg.setPlaceholderText("ADAM: MISSION BRIEFING...")
+        self.ed_dlg.editingFinished.connect(self._on_room_meta_changed)
+        wl.addWidget(self.ed_dlg, 1)
+        right.addWidget(wbar)
 
         bar = QWidget()
         bar.setObjectName("ControlBar")
@@ -777,6 +848,26 @@ class LevelEditorPage(QWidget):
     def refresh_all(self) -> None:
         if not self.project:
             return
+        self.cmb_room.blockSignals(True)
+        self.cmb_room.clear()
+        for i, rm in enumerate(self.project.rooms):
+            self.cmb_room.addItem(f"R{i + 1}: {rm.name}", i)
+        self.cmb_room.setCurrentIndex(self.project.active_room_idx)
+        self.cmb_room.blockSignals(False)
+
+        cur_rm = self.project.level
+        self.cmb_upg.blockSignals(True)
+        ui = self.cmb_upg.findData(cur_rm.upgrade_ability)
+        if ui >= 0:
+            self.cmb_upg.setCurrentIndex(ui)
+        self.cmb_upg.blockSignals(False)
+        self.cb_par.blockSignals(True)
+        self.cb_par.setChecked(cur_rm.parallax_enabled)
+        self.cb_par.blockSignals(False)
+        self.ed_dlg.blockSignals(True)
+        self.ed_dlg.setText(cur_rm.dialogue_text)
+        self.ed_dlg.blockSignals(False)
+
         self.cmb_phys.blockSignals(True)
         self.cmb_phys.setCurrentIndex(1 if self.project.physics_mode == "topdown" else 0)
         self.cmb_phys.blockSignals(False)
@@ -864,6 +955,51 @@ class LevelEditorPage(QWidget):
         self.map_canvas.show_viewport = on
         self.map_canvas.update()
 
+    def _on_room_selected(self, idx: int) -> None:
+        if self.project and 0 <= idx < len(self.project.rooms):
+            self.project.active_room_idx = idx
+            self.refresh_all()
+
+    def _add_room(self) -> None:
+        if not self.project or len(self.project.rooms) >= 16:
+            return
+        n = len(self.project.rooms) + 1
+        w, h = 40, 20
+        cells = empty_grid(w, h, 0)
+        for x in range(w):
+            cells[0][x] = 9; cells[h - 2][x] = 2; cells[h - 1][x] = 9
+        for y in range(h):
+            cells[y][0] = 9; cells[y][w - 1] = 9
+        self.project.rooms.append(LevelMap(name=f"Sector {n}", width=w, height=h, spawn_x=3, spawn_y=h - 5, cells=cells))
+        self.project.active_room_idx = len(self.project.rooms) - 1
+        self.refresh_all()
+        self.projectModified.emit(f"Add Room (Sector {n})")
+
+    def _link_door_dialog(self) -> None:
+        if not self.project:
+            return
+        rm_names = [f"R{i + 1}: {r.name}" for i, r in enumerate(self.project.rooms)]
+        choice, ok = QInputDialog.getItem(self, "Link Hatch Door", "Target Destination Room:", rm_names, 0, False)
+        if not ok:
+            return
+        target_idx = rm_names.index(choice)
+        lvl = self.project.level
+        tx = max(1, lvl.width - 2)
+        ty = max(2, lvl.height - 3)
+        lvl.set_tile(tx, ty, 11 if len(self.project.tiles) > 11 else 7)
+        lvl.doors.append(DoorLink(tile_x=tx, tile_y=ty, target_room=target_idx, target_x=3, target_y=max(2, self.project.rooms[target_idx].height - 6)))
+        self.map_canvas.update()
+        self.projectModified.emit(f"Link Door to R{target_idx + 1}")
+
+    def _on_room_meta_changed(self) -> None:
+        if not self.project:
+            return
+        rm = self.project.level
+        rm.upgrade_ability = int(self.cmb_upg.currentData())
+        rm.parallax_enabled = self.cb_par.isChecked()
+        rm.dialogue_text = self.ed_dlg.text().strip().upper()[:48]
+        self.projectModified.emit("Update Room Settings")
+
 
 # ---------------------------------------------------------------------------
 # Stage 3: Simple & Intuitive Visual Button Wiring Studio
@@ -900,9 +1036,13 @@ class ButtonWiringPage(QWidget):
         b_rpg.clicked.connect(lambda: self._apply_scheme("topdown"))
         b_act = QPushButton("Action Blaster")
         b_act.clicked.connect(lambda: self._apply_scheme("shooter"))
+        b_met = QPushButton("Metroidvania")
+        b_met.setObjectName("PrimaryButton")
+        b_met.clicked.connect(lambda: self._apply_scheme("metroidvania"))
         pl.addWidget(b_plat)
         pl.addWidget(b_rpg)
         pl.addWidget(b_act)
+        pl.addWidget(b_met)
         left.addWidget(preset_box)
         root.addLayout(left, 2)
 
@@ -1058,7 +1198,19 @@ class ButtonWiringPage(QWidget):
     def _apply_scheme(self, kind: str) -> None:
         if not self.project:
             return
-        if kind == "topdown":
+        if kind == "metroidvania":
+            self.project.physics_mode = "platformer"
+            rules = [
+                ButtonRule(button="LEFT", trigger=TRIGGER_HELD, action=ACTION_MOVE_LEFT, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="RIGHT", trigger=TRIGGER_HELD, action=ACTION_MOVE_RIGHT, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="L", trigger=TRIGGER_HELD, action=ACTION_AIM_UP, param=0, anim_name="", sfx_index=-1),
+                ButtonRule(button="A", trigger=TRIGGER_PRESSED, action=ACTION_JUMP, param=6, anim_name="jump", sfx_index=0),
+                ButtonRule(button="B", trigger=TRIGGER_PRESSED, action=ACTION_SHOOT, param=5, anim_name="attack", sfx_index=2),
+                ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_BOMB, param=4, anim_name="attack", sfx_index=4),
+                ButtonRule(button="SELECT", trigger=TRIGGER_PRESSED, action=ACTION_MORPH_BALL, param=0, anim_name="", sfx_index=3),
+                ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_PAUSE, param=0, anim_name="", sfx_index=-1),
+            ]
+        elif kind == "topdown":
             self.project.physics_mode = "topdown"
             rules = [
                 ButtonRule(button="LEFT", trigger=TRIGGER_HELD, action=ACTION_MOVE_LEFT, param=2, anim_name="walk", sfx_index=-1),
@@ -1212,6 +1364,22 @@ class SfxEditorPage(QWidget):
         b_play.clicked.connect(self._preview_current)
         prow.addWidget(b_play, 1)
         right.addLayout(prow)
+
+        # Direct Sound DMA Channel A (8-bit PCM Hardware Audio)
+        dma_box = QGroupBox("GBA Direct Sound DMA Channel A (8-bit PCM Sample)")
+        dl = QHBoxLayout(dma_box)
+        self.cb_dma_en = QCheckBox("Enable DMA Audio")
+        self.cb_dma_en.setChecked(True)
+        self.cb_dma_en.toggled.connect(self._on_dma_changed)
+        dl.addWidget(self.cb_dma_en)
+        self.cmb_dma_preset = QComboBox()
+        self.cmb_dma_preset.addItems(DIRECT_SOUND_PRESETS)
+        self.cmb_dma_preset.currentIndexChanged.connect(self._on_dma_changed)
+        dl.addWidget(self.cmb_dma_preset, 1)
+        b_dma_play = QPushButton("▶ Preview DMA PCM")
+        b_dma_play.clicked.connect(self._preview_dma)
+        dl.addWidget(b_dma_play)
+        right.addWidget(dma_box)
         right.addStretch(1)
         root.addLayout(right, 1)
 
@@ -1253,6 +1421,12 @@ class SfxEditorPage(QWidget):
             self.lst_sfx.addItem(f"#{i} {s.name} [{ch_tag}]")
         self.lst_sfx.setCurrentRow(self.sfx_idx)
         self.lst_sfx.blockSignals(False)
+        self.cb_dma_en.blockSignals(True)
+        self.cb_dma_en.setChecked(self.project.direct_sound.enabled)
+        self.cb_dma_en.blockSignals(False)
+        self.cmb_dma_preset.blockSignals(True)
+        self.cmb_dma_preset.setCurrentText(self.project.direct_sound.preset)
+        self.cmb_dma_preset.blockSignals(False)
         self._load_current()
 
     def _cur_patch(self) -> Optional[SfxPatch]:
@@ -1331,6 +1505,17 @@ class SfxEditorPage(QWidget):
         self.sfx_idx = len(self.project.sfx_list) - 1
         self.refresh_all()
         self.projectModified.emit("Add Chiptune SFX")
+
+    def _on_dma_changed(self) -> None:
+        if not self.project:
+            return
+        self.project.direct_sound.enabled = self.cb_dma_en.isChecked()
+        self.project.direct_sound.preset = self.cmb_dma_preset.currentText()
+        self.projectModified.emit("Update Direct Sound DMA Sample")
+
+    def _preview_dma(self) -> None:
+        if self.project:
+            self.audio.play_direct_sound(self.project.direct_sound)
 
 
 # ---------------------------------------------------------------------------
@@ -1433,6 +1618,16 @@ class PlaytestBuildPage(QWidget):
         self.cmb_target.addItem("Game Boy Classic (DMG · 160×144)", "GB")
         self.cmb_target.currentIndexChanged.connect(self._on_target_changed)
         fl.addRow("Target System:", self.cmb_target)
+
+        self.cb_sram = QCheckBox("GBA Cartridge SRAM Save (SRAM_V113)")
+        self.cb_sram.setChecked(True)
+        self.cb_sram.toggled.connect(self._on_hw_flags_changed)
+        fl.addRow("", self.cb_sram)
+
+        self.cb_alpha = QCheckBox("BG2 Parallax Hardware Alpha Blending")
+        self.cb_alpha.setChecked(True)
+        self.cb_alpha.toggled.connect(self._on_hw_flags_changed)
+        fl.addRow("", self.cb_alpha)
         right.addWidget(hdr_box)
 
         build_box = QGroupBox("One-Click Cartridge Compiler (Zero External Toolchain)")
@@ -1463,7 +1658,7 @@ class PlaytestBuildPage(QWidget):
 
     def set_project(self, proj: KinoPixelProject) -> None:
         self.project = proj
-        self.sim = GamePlaytestEngine(proj, on_sfx=self._play_sfx_index)
+        self.sim = GamePlaytestEngine(proj, on_sfx=self._play_sfx_index, on_dma=self._play_dma)
         self.refresh_all()
         self._render_once()
 
@@ -1484,15 +1679,25 @@ class PlaytestBuildPage(QWidget):
         if idx >= 0:
             self.cmb_target.setCurrentIndex(idx)
         self.cmb_target.blockSignals(False)
+        self.cb_sram.blockSignals(True)
+        self.cb_sram.setChecked(self.project.sram_save_enabled)
+        self.cb_sram.blockSignals(False)
+        self.cb_alpha.blockSignals(True)
+        self.cb_alpha.setChecked(self.project.alpha_blend_enabled)
+        self.cb_alpha.blockSignals(False)
 
     def _play_sfx_index(self, idx: int) -> None:
         if self.project and 0 <= idx < len(self.project.sfx_list):
             self.audio.play_patch(self.project.sfx_list[idx])
 
+    def _play_dma(self) -> None:
+        if self.project:
+            self.audio.play_direct_sound(self.project.direct_sound)
+
     def start_playtest(self) -> None:
         if not self.project:
             return
-        self.sim = GamePlaytestEngine(self.project, on_sfx=self._play_sfx_index)
+        self.sim = GamePlaytestEngine(self.project, on_sfx=self._play_sfx_index, on_dma=self._play_dma)
         self.running = True
         self.btn_run.setText("■  Stop Playtest")
         self._timer.start()
@@ -1511,7 +1716,7 @@ class PlaytestBuildPage(QWidget):
 
     def reset_playtest(self) -> None:
         if self.project:
-            self.sim = GamePlaytestEngine(self.project, on_sfx=self._play_sfx_index)
+            self.sim = GamePlaytestEngine(self.project, on_sfx=self._play_sfx_index, on_dma=self._play_dma)
             self._render_once()
             self.screen.setFocus()
 
@@ -1530,7 +1735,18 @@ class PlaytestBuildPage(QWidget):
         if not self.sim:
             return
         rgb = self.sim.render_rgb()
-        self.screen.set_frame(rgb, self.sim.hp, self.sim.coins, self.sim.score, self.sim.paused, self.sim.won)
+        self.screen.set_frame(
+            rgb, self.sim.hp, self.sim.coins, self.sim.score, self.sim.paused, self.sim.won,
+            room_idx=self.sim.room_idx, boss_hp=self.sim.boss_hp,
+            banner=self.sim.banner_msg, dialogue=self.sim.dialog_text,
+        )
+
+    def _on_hw_flags_changed(self) -> None:
+        if not self.project:
+            return
+        self.project.sram_save_enabled = self.cb_sram.isChecked()
+        self.project.alpha_blend_enabled = self.cb_alpha.isChecked()
+        self.projectModified.emit("Update GBA Hardware Flags")
 
     def _on_header_edited(self) -> None:
         if not self.project:

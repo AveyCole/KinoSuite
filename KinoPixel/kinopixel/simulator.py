@@ -1,21 +1,29 @@
-"""Live 60fps Hardware-Faithful Playtest Engine for KinoPixel (GB / GBC / GBA).
+"""Live 60fps Hardware-Faithful Metroidvania Playtest Engine for KinoPixel v2.0.
 
-Mirrors the exact compiled GBA ARM7TDMI kernel behavior: tilemap collisions,
-user-wired button rules, multi-frame sprite animations, patrolling enemies,
-projectiles, camera scroll, HUD, and real-time chiptune SFX playback.
+Mirrors the exact compiled GBA ARM7TDMI v2.0 kernel: multi-room doors & ability gates,
+16x32 tall hero & 16x16 Morph Ball hitbox swap, 32x32 multi-HP Bosses, SA-X Chaser &
+Turret AI, 8-way diagonal aiming, Wall-Jump, destructible blocks, BG2 parallax,
+Save Stations, Upgrade Orbs, Direct Sound DMA cues, and Navigation Terminal dialogue.
 """
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, List, Optional, Set
 
 import numpy as np
 
 from .models import (
+    ABIL_HIGH_JUMP,
+    ABIL_MORPH_BALL,
+    ABIL_WALL_JUMP,
+    ACTION_AIM_UP,
+    ACTION_BOMB,
     ACTION_DASH,
+    ACTION_INTERACT,
     ACTION_JUMP,
     ACTION_MELEE,
+    ACTION_MORPH_BALL,
     ACTION_MOVE_DOWN,
     ACTION_MOVE_LEFT,
     ACTION_MOVE_RIGHT,
@@ -26,14 +34,22 @@ from .models import (
     ACTION_RESET_LEVEL,
     ACTION_SHOOT,
     ACTION_SWITCH_ANIM,
+    AI_BOSS,
+    AI_CHASER,
+    AI_TURRET,
     BUTTON_BITS,
     KinoPixelProject,
     TILE_BOUNCE,
+    TILE_BREAKABLE,
     TILE_COIN,
+    TILE_DOOR,
     TILE_GOAL,
     TILE_HAZARD,
     TILE_ONEWAY,
+    TILE_SAVE,
     TILE_SOLID,
+    TILE_TERMINAL,
+    TILE_UPGRADE,
     TRIGGER_HELD,
     TRIGGER_PRESSED,
     TRIGGER_RELEASED,
@@ -47,6 +63,9 @@ class _LiveProj:
     x: float = 0.0
     y: float = 0.0
     vx: float = 0.0
+    vy: float = 0.0
+    heavy: bool = False
+    is_enemy: bool = False
 
 
 @dataclass
@@ -59,20 +78,30 @@ class _LiveEnemy:
     direction: int = 1
     speed: int = 1
     sprite_index: int = 1
+    ai_type: int = 0
+    hp: int = 1
+    is_32: bool = False
 
 
 class GamePlaytestEngine:
-    """Deterministic 60 FPS simulator matching the compiled .gba ROM engine 1:1."""
+    """Deterministic 60 FPS Metroidvania simulator matching the compiled .gba ROM kernel 1:1."""
 
-    def __init__(self, project: KinoPixelProject, on_sfx: Optional[Callable[[int], None]] = None) -> None:
+    def __init__(
+        self,
+        project: KinoPixelProject,
+        on_sfx: Optional[Callable[[int], None]] = None,
+        on_dma: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.project = project
         self.on_sfx = on_sfx
+        self.on_dma = on_dma
+        self.room_idx: int = 0
         self.cells: List[List[int]] = []
         self.px: float = 0.0
         self.py: float = 0.0
         self.vx: float = 0.0
         self.vy: float = 0.0
-        self.facing: int = 0  # 0=right, 1=left
+        self.facing: int = 0
         self.on_ground: bool = False
         self.palette_idx: int = 0
         self.anim_name: str = "idle"
@@ -80,7 +109,7 @@ class GamePlaytestEngine:
         self.anim_lock: int = 0
         self.score: int = 0
         self.coins: int = 0
-        self.hp: int = 3
+        self.hp: int = 5
         self.invuln: int = 0
         self.paused: bool = False
         self.won: bool = False
@@ -90,6 +119,15 @@ class GamePlaytestEngine:
         self.dash_timer: int = 0
         self.melee_timer: int = 0
         self.shoot_cd: int = 0
+        self.abilities: int = 0
+        self.morphed: bool = False
+        self.aim_y: int = 0
+        self.dialog_text: str = ""
+        self.banner_msg: str = ""
+        self.banner_timer: int = 0
+        self.door_cd: int = 0
+        self.term_cd: int = 0
+        self.boss_hp: int = 0
         self.prev_keys: int = 0
         self.curr_keys: int = 0
         self.projs: List[_LiveProj] = []
@@ -100,50 +138,66 @@ class GamePlaytestEngine:
         self.project = project
         self.reset()
 
+    def _active_room(self):
+        rooms = self.project.rooms or [self.project.level]
+        return rooms[max(0, min(len(rooms) - 1, self.room_idx))]
+
+    def _hero_h(self) -> int:
+        if self.morphed:
+            return 16
+        return self.project.sprites[0].height if self.project.sprites else 16
+
     def reset(self) -> None:
-        lvl = self.project.level
-        self.cells = copy.deepcopy(lvl.cells)
-        self.px = float(max(8, min((lvl.width - 2) * 8, lvl.spawn_x * 8)))
-        self.py = float(max(8, min((lvl.height - 2) * 8, lvl.spawn_y * 8)))
-        self.vx = 0.0
-        self.vy = 0.0
-        self.facing = 0
-        self.on_ground = False
-        self.anim_name = "idle"
-        self.anim_timer = 0
-        self.anim_lock = 0
         self.score = 0
         self.coins = 0
-        self.hp = 3
+        self.hp = 5
         self.invuln = 0
         self.paused = False
         self.won = False
-        self.dash_timer = 0
-        self.melee_timer = 0
-        self.shoot_cd = 0
-        self.projs = [_LiveProj() for _ in range(4)]
+        self.abilities = self.project.starting_abilities
+        self.morphed = False
+        self.dialog_text = ""
+        self.banner_msg = ""
+        self.banner_timer = 0
+        self.door_cd = 0
+        self.term_cd = 0
+        self.load_room(0)
+
+    def load_room(self, r_idx: int, tx: Optional[int] = None, ty: Optional[int] = None) -> None:
+        rooms = self.project.rooms or [self.project.level]
+        self.room_idx = max(0, min(len(rooms) - 1, r_idx))
+        lvl = rooms[self.room_idx]
+        self.cells = copy.deepcopy(lvl.cells)
+        sx = lvl.spawn_x if tx is None else tx
+        sy = lvl.spawn_y if ty is None else ty
+        self.px = float(max(8, min((lvl.width - 2) * 8, sx * 8)))
+        self.py = float(max(8, min((lvl.height - 2) * 8, sy * 8)))
+        self.vx = 0.0
+        self.vy = 0.0
+        self.on_ground = False
+        self.projs = [_LiveProj() for _ in range(6)]
         self.enemies = []
         for e in lvl.entities[:16]:
-            ex = float(max(8, min((lvl.width - 2) * 8, e.tile_x * 8)))
-            ey = float(max(8, min((lvl.height - 2) * 8, e.tile_y * 8)))
+            sp = self.project.sprites[e.sprite_index] if e.sprite_index < len(self.project.sprites) else None
+            is_32 = bool((sp and sp.width >= 32) or e.ai_type == AI_BOSS)
+            ex = float(max(8, min((lvl.width - (4 if is_32 else 2)) * 8, e.tile_x * 8)))
+            ey = float(max(8, min((lvl.height - (4 if is_32 else 2)) * 8, e.tile_y * 8)))
             pr = max(1, e.patrol_range) * 8.0
-            self.enemies.append(
-                _LiveEnemy(
-                    active=True,
-                    x=ex,
-                    y=ey,
-                    min_x=max(8.0, ex - pr),
-                    max_x=min((lvl.width - 2) * 8.0, ex + pr),
-                    direction=1,
-                    speed=max(1, min(4, e.speed)),
-                    sprite_index=e.sprite_index,
-                )
-            )
+            self.enemies.append(_LiveEnemy(
+                active=True, x=ex, y=ey, min_x=max(8.0, ex - pr),
+                max_x=min((lvl.width - (4 if is_32 else 2)) * 8.0, ex + pr),
+                direction=1, speed=max(1, min(4, e.speed)),
+                sprite_index=e.sprite_index, ai_type=e.ai_type, hp=max(1, e.hp), is_32=is_32,
+            ))
         self._update_camera()
 
     def _emit_sfx(self, idx: int) -> None:
         if self.on_sfx and 0 <= idx < len(self.project.sfx_list):
             self.on_sfx(idx)
+
+    def _emit_dma(self) -> None:
+        if self.on_dma and self.project.direct_sound.enabled:
+            self.on_dma()
 
     def _find_sfx(self, keyword: str, fallback: int) -> int:
         for i, p in enumerate(self.project.sfx_list):
@@ -152,17 +206,17 @@ class GamePlaytestEngine:
         return fallback if fallback < len(self.project.sfx_list) else -1
 
     def _tile_type_at_px(self, x: float, y: float) -> int:
-        tx = int(x) // 8
-        ty = int(y) // 8
-        lvl = self.project.level
+        tx, ty = int(x) // 8, int(y) // 8
+        lvl = self._active_room()
         if tx < 0 or tx >= lvl.width:
             return TILE_SOLID
         if ty < 0 or ty >= lvl.height:
             return 0
         ti = self.cells[ty][tx]
-        if 0 <= ti < len(self.project.tiles):
-            return self.project.tiles[ti].tile_type
-        return 0
+        return self.project.tiles[ti].tile_type if 0 <= ti < len(self.project.tiles) else 0
+
+    def _is_solid_px(self, x: float, y: float) -> bool:
+        return self._tile_type_at_px(x, y) in (TILE_SOLID, TILE_BREAKABLE)
 
     def _damage_respawn(self) -> None:
         if self.invuln > 0:
@@ -173,14 +227,30 @@ class GamePlaytestEngine:
             self.reset()
             return
         self.invuln = 45
-        lvl = self.project.level
-        self.px = float(max(8, min((lvl.width - 2) * 8, lvl.spawn_x * 8)))
-        self.py = float(max(8, min((lvl.height - 2) * 8, lvl.spawn_y * 8)))
-        self.vx = 0.0
-        self.vy = 0.0
+        lvl = self._active_room()
+        self.px = float(max(8, lvl.spawn_x * 8))
+        self.py = float(max(8, lvl.spawn_y * 8))
+        self.vx = self.vy = 0.0
+
+    def _spawn_player_proj(self, speed: int, heavy: bool) -> None:
+        spd = max(1, speed)
+        for pr in self.projs[:4]:
+            if not pr.active:
+                pr.active = True
+                pr.is_enemy = False
+                pr.heavy = heavy
+                pr.x = self.px + (-8 if self.facing else 8)
+                pr.y = self.py + 4
+                if self.aim_y != 0:
+                    horiz = bool(self.curr_keys & (BUTTON_BITS["LEFT"] | BUTTON_BITS["RIGHT"]))
+                    pr.vx = (-spd if self.facing else spd) if horiz else 0.0
+                    pr.vy = float(spd * self.aim_y)
+                else:
+                    pr.vx = float(-spd if self.facing else spd)
+                    pr.vy = 0.0
+                return
 
     def step(self, pressed_buttons: Set[str]) -> None:
-        """Advance simulation by one 60 Hz frame."""
         self.frame += 1
         self.prev_keys = self.curr_keys
         mask = 0
@@ -190,34 +260,38 @@ class GamePlaytestEngine:
         just_pressed = self.curr_keys & ~self.prev_keys
         released = self.prev_keys & ~self.curr_keys
 
+        # Dismiss Navigation Terminal Dialogue on A or B
+        if self.dialog_text:
+            if just_pressed & (BUTTON_BITS["A"] | BUTTON_BITS["B"]):
+                self.dialog_text = ""
+                self.term_cd = 35
+            return
+
         if self.won:
             if just_pressed & (BUTTON_BITS["START"] | BUTTON_BITS["A"]):
                 self.reset()
             return
 
-        if self.invuln > 0:
-            self.invuln -= 1
-        if self.anim_lock > 0:
-            self.anim_lock -= 1
-        if self.dash_timer > 0:
-            self.dash_timer -= 1
-        if self.melee_timer > 0:
-            self.melee_timer -= 1
-        if self.shoot_cd > 0:
-            self.shoot_cd -= 1
+        for attr in ("invuln", "anim_lock", "dash_timer", "melee_timer", "shoot_cd", "banner_timer", "door_cd", "term_cd"):
+            v = getattr(self, attr)
+            if v > 0:
+                setattr(self, attr, v - 1)
+        if self.banner_timer == 0:
+            self.banner_msg = ""
 
         moved = False
+        self.aim_y = -1 if (self.curr_keys & BUTTON_BITS["UP"]) else 0
         if self.dash_timer == 0:
             self.vx = 0.0
             if self.project.physics_mode == "topdown":
                 self.vy = 0.0
 
-        # Evaluate user-wired button rules
+        # Evaluate Button Wiring Rules
         for rule in self.project.button_rules:
             if not rule.enabled:
                 continue
             rmask = BUTTON_BITS.get(rule.button.upper(), 0)
-            if rmask == 0:
+            if not rmask:
                 continue
             src = self.curr_keys if rule.trigger == TRIGGER_HELD else (just_pressed if rule.trigger == TRIGGER_PRESSED else released)
             if not (src & rmask):
@@ -227,23 +301,35 @@ class GamePlaytestEngine:
 
             triggered = True
             if rule.action == ACTION_MOVE_LEFT:
-                self.vx = -rule.param * 0.5
-                self.facing = 1
-                moved = True
+                self.vx = -rule.param * 0.5; self.facing = 1; moved = True
             elif rule.action == ACTION_MOVE_RIGHT:
-                self.vx = rule.param * 0.5
-                self.facing = 0
-                moved = True
+                self.vx = rule.param * 0.5; self.facing = 0; moved = True
             elif rule.action == ACTION_MOVE_UP:
-                self.vy = -rule.param * 0.5
-                moved = True
+                if self.project.physics_mode == "topdown":
+                    self.vy = -rule.param * 0.5; moved = True
+                else:
+                    self.aim_y = -1
             elif rule.action == ACTION_MOVE_DOWN:
-                self.vy = rule.param * 0.5
-                moved = True
+                if self.project.physics_mode == "topdown":
+                    self.vy = rule.param * 0.5; moved = True
+                else:
+                    self.aim_y = 1
+            elif rule.action == ACTION_AIM_UP:
+                self.aim_y = -1
             elif rule.action == ACTION_JUMP:
+                bonus = 0.75 if (self.abilities & ABIL_HIGH_JUMP) else 0.0
                 if self.on_ground:
-                    self.vy = -(rule.param * 0.5 + 0.75)
+                    self.vy = -(rule.param * 0.5 + 0.75 + bonus)
                     self.on_ground = False
+                elif self.abilities & ABIL_WALL_JUMP:
+                    if self._is_solid_px(self.px - 2, self.py + 8):
+                        self.vx = 2.0; self.facing = 0; self.dash_timer = 7
+                        self.vy = -(rule.param * 0.5 + 0.75 + bonus)
+                    elif self._is_solid_px(self.px + 17, self.py + 8):
+                        self.vx = -2.0; self.facing = 1; self.dash_timer = 7
+                        self.vy = -(rule.param * 0.5 + 0.75 + bonus)
+                    else:
+                        triggered = False
                 else:
                     triggered = False
             elif rule.action == ACTION_DASH:
@@ -252,19 +338,34 @@ class GamePlaytestEngine:
                 self.dash_timer = 10
             elif rule.action == ACTION_SHOOT:
                 if self.shoot_cd == 0:
-                    self.shoot_cd = 12
-                    for pr in self.projs:
-                        if not pr.active:
-                            pr.active = True
-                            pr.x = self.px + (-8 if self.facing else 8)
-                            pr.y = self.py
-                            spd = max(1, rule.param)
-                            pr.vx = -float(spd) if self.facing else float(spd)
-                            break
+                    self.shoot_cd = 10
+                    self._spawn_player_proj(rule.param, heavy=False)
+                else:
+                    triggered = False
+            elif rule.action == ACTION_BOMB:
+                if self.shoot_cd == 0:
+                    self.shoot_cd = 14
+                    self._spawn_player_proj(rule.param, heavy=True)
                 else:
                     triggered = False
             elif rule.action == ACTION_MELEE:
                 self.melee_timer = 14
+            elif rule.action == ACTION_MORPH_BALL:
+                if self.abilities & ABIL_MORPH_BALL:
+                    base_h = self.project.sprites[0].height if self.project.sprites else 16
+                    if not self.morphed:
+                        self.morphed = True
+                        self.py += max(0, base_h - 16)
+                    else:
+                        if base_h <= 16 or not self._is_solid_px(self.px + 8, self.py - 14):
+                            self.morphed = False
+                            self.py = max(0.0, self.py - max(0, base_h - 16))
+                        else:
+                            triggered = False
+                else:
+                    triggered = False
+            elif rule.action == ACTION_INTERACT:
+                self.term_cd = 0
             elif rule.action == ACTION_PALETTE_NEXT:
                 self.palette_idx = (self.palette_idx + 1) % max(1, len(self.project.palettes))
             elif rule.action == ACTION_RESET_LEVEL:
@@ -285,117 +386,156 @@ class GamePlaytestEngine:
         if self.paused:
             return
 
-        # Gravity in platformer mode
         if self.project.physics_mode == "platformer":
             self.vy = min(self.project.max_fall_speed / 256.0, self.vy + self.project.gravity / 256.0)
 
-        lvl = self.project.level
-        lvl_w_px = lvl.width * 8
-        lvl_h_px = lvl.height * 8
+        lvl = self._active_room()
+        lvl_w_px, lvl_h_px = lvl.width * 8, lvl.height * 8
+        hh = self._hero_h()
 
-        # Horizontal move + solid collision
+        # Horizontal move
         new_x = max(0.0, min(lvl_w_px - 16.0, self.px + self.vx))
         if self.vx > 0:
-            if self._tile_type_at_px(new_x + 13, self.py + 2) == TILE_SOLID or self._tile_type_at_px(new_x + 13, self.py + 13) == TILE_SOLID:
-                new_x = self.px
-                self.vx = 0.0
+            if any(self._is_solid_px(new_x + 13, self.py + oy) for oy in (2, hh // 2, hh - 3)):
+                new_x = self.px; self.vx = 0.0
         elif self.vx < 0:
-            if self._tile_type_at_px(new_x + 2, self.py + 2) == TILE_SOLID or self._tile_type_at_px(new_x + 2, self.py + 13) == TILE_SOLID:
-                new_x = self.px
-                self.vx = 0.0
+            if any(self._is_solid_px(new_x + 2, self.py + oy) for oy in (2, hh // 2, hh - 3)):
+                new_x = self.px; self.vx = 0.0
         self.px = new_x
 
-        # Vertical move + solid / oneway collision
+        # Vertical move
         self.on_ground = False
         new_y = max(0.0, self.py + self.vy)
-        if new_y >= lvl_h_px - 14:
-            self._damage_respawn()
-            self._update_camera()
-            return
+        if new_y >= lvl_h_px - hh + 2:
+            self._damage_respawn(); self._update_camera(); return
         if self.vy >= 0:
             landed = False
             for ox in (3, 12):
-                tt = self._tile_type_at_px(self.px + ox, new_y + 16)
-                if tt == TILE_SOLID:
+                tt = self._tile_type_at_px(self.px + ox, new_y + hh)
+                if tt in (TILE_SOLID, TILE_BREAKABLE):
                     landed = True
                 elif tt == TILE_ONEWAY:
-                    tile_top = ((int(new_y + 16)) // 8) * 8
-                    if int(self.py + 16) <= tile_top:
+                    tile_top = ((int(new_y + hh)) // 8) * 8
+                    if int(self.py + hh) <= tile_top:
                         landed = True
             if landed:
-                new_y = float((((int(new_y + 16)) // 8) * 8) - 16)
+                new_y = float((((int(new_y + hh)) // 8) * 8) - hh)
                 self.vy = 0.0
                 self.on_ground = True
         else:
-            if self._tile_type_at_px(self.px + 3, new_y + 2) == TILE_SOLID or self._tile_type_at_px(self.px + 12, new_y + 2) == TILE_SOLID:
-                new_y = self.py
-                self.vy = 0.0
+            if self._is_solid_px(self.px + 3, new_y + 2) or self._is_solid_px(self.px + 12, new_y + 2):
+                new_y = self.py; self.vy = 0.0
         self.py = new_y
 
-        # Tile triggers: Coin, Hazard, Bounce, Goal
-        for ox, oy in ((8, 8), (8, 13)):
-            cx, cy = self.px + ox, self.py + oy
+        # Tile Triggers
+        for oy in (8, hh - 3):
+            cx, cy = self.px + 8, self.py + oy
             tt = self._tile_type_at_px(cx, cy)
+            tx, ty = int(cx) // 8, int(cy) // 8
             if tt == TILE_COIN:
-                tx, ty = int(cx) // 8, int(cy) // 8
-                if 0 <= ty < lvl.height and 0 <= tx < lvl.width:
-                    self.cells[ty][tx] = 0
-                self.coins += 1
-                self.score += 100
+                self.cells[ty][tx] = 0; self.coins += 1; self.score += 100
                 self._emit_sfx(self._find_sfx("coin", 1))
             elif tt == TILE_HAZARD:
-                self._damage_respawn()
-                break
+                self._damage_respawn(); break
             elif tt == TILE_BOUNCE:
-                self.vy = -4.25
-                self.on_ground = False
-                self._emit_sfx(self._find_sfx("jump", 0))
+                self.vy = -4.25; self.on_ground = False; self._emit_sfx(self._find_sfx("jump", 0))
             elif tt == TILE_GOAL:
-                self.won = True
-                self._emit_sfx(self._find_sfx("clear", 5))
+                self.won = True; self._emit_sfx(self._find_sfx("clear", 5)); self._emit_dma(); break
+            elif tt == TILE_UPGRADE:
+                self.cells[ty][tx] = 0
+                self.abilities |= lvl.upgrade_ability
+                self.banner_msg = "UPGRADE ACQUIRED!"; self.banner_timer = 75
+                self._emit_sfx(self._find_sfx("clear", 5)); self._emit_dma()
+            elif tt == TILE_SAVE and self.banner_timer == 0:
+                self.hp = 5
+                self.banner_msg = "SRAM SAVED!"; self.banner_timer = 75
+                self._emit_sfx(self._find_sfx("coin", 1))
+            elif tt == TILE_TERMINAL and self.term_cd == 0:
+                self.dialog_text = lvl.dialogue_text
+                self._emit_sfx(self._find_sfx("coin", 1)); break
+            elif tt == TILE_DOOR and self.door_cd == 0:
+                dr = lvl.find_door_near(tx, ty)
+                if dr:
+                    if dr.req_ability and not (self.abilities & dr.req_ability):
+                        self.banner_msg = "HATCH LOCKED!"; self.banner_timer = 45; self.door_cd = 30
+                        self._emit_sfx(self._find_sfx("hurt", 4))
+                    else:
+                        self.door_cd = 35
+                        self.load_room(dr.target_room, dr.target_x, dr.target_y)
                 break
 
-        # Projectiles
+        # Projectiles + Destructible Blocks
         for pr in self.projs:
             if not pr.active:
                 continue
-            pr.x += pr.vx
-            if pr.x < 0 or pr.x >= lvl_w_px or self._tile_type_at_px(pr.x + 8, pr.y + 8) == TILE_SOLID:
+            pr.x += pr.vx; pr.y += pr.vy
+            if pr.x < 0 or pr.x >= lvl_w_px or pr.y < 0 or pr.y >= lvl_h_px:
+                pr.active = False; continue
+            if pr.is_enemy and abs(pr.x - self.px) <= 10 and abs(pr.y - self.py) <= hh // 2 + 8:
+                pr.active = False; self._damage_respawn(); continue
+            tt = self._tile_type_at_px(pr.x + 8, pr.y + 8)
+            if tt == TILE_BREAKABLE:
+                bx, by = int(pr.x + 8) // 8, int(pr.y + 8) // 8
+                if 0 <= by < lvl.height and 0 <= bx < lvl.width:
+                    self.cells[by][bx] = 0
+                pr.active = False; self._emit_sfx(self._find_sfx("hurt", 4))
+            elif tt == TILE_SOLID:
                 pr.active = False
 
-        # Enemies
+        # Enemies & 32x32 Bosses
+        self.boss_hp = 0
         for en in self.enemies:
             if not en.active:
                 continue
+            if en.ai_type == AI_BOSS:
+                self.boss_hp = en.hp
             if (self.frame & 1) == 0:
-                en.x += en.direction * en.speed
-                if en.x <= en.min_x:
-                    en.x = en.min_x
-                    en.direction = 1
-                elif en.x >= en.max_x:
-                    en.x = en.max_x
-                    en.direction = -1
-            # Projectile hit
-            for pr in self.projs:
-                if pr.active and abs(pr.x - en.x) <= 12 and abs(pr.y - en.y) <= 12:
+                if en.ai_type == AI_CHASER:
+                    if en.x < self.px:
+                        en.x += en.speed; en.direction = 1
+                    elif en.x > self.px:
+                        en.x -= en.speed; en.direction = -1
+                elif en.ai_type == AI_TURRET:
+                    if (self.frame & 63) == 0:
+                        for ep in self.projs[4:]:
+                            if not ep.active:
+                                ep.active = True; ep.is_enemy = True; ep.x = en.x; ep.y = en.y
+                                ep.vx = 2.0 if self.px >= en.x else -2.0; ep.vy = 0.0; break
+                else:
+                    en.x += en.direction * en.speed
+                    if en.x <= en.min_x:
+                        en.x = en.min_x; en.direction = 1
+                    elif en.x >= en.max_x:
+                        en.x = en.max_x; en.direction = -1
+                    if en.ai_type == AI_BOSS and (self.frame & 63) == 32:
+                        for ep in self.projs[4:]:
+                            if not ep.active:
+                                ep.active = True; ep.is_enemy = True; ep.x = en.x + 8; ep.y = en.y + 12
+                                ep.vx = 3.0 if self.px >= en.x else -3.0; ep.vy = 0.0; break
+
+            rad = 22 if en.is_32 else 12
+            for pr in self.projs[:4]:
+                if pr.active and abs(pr.x - en.x) <= rad and abs(pr.y - en.y) <= rad:
+                    dmg = 3 if pr.heavy else 1
                     pr.active = False
-                    en.active = False
-                    self.score += 200
-                    self._emit_sfx(self._find_sfx("hurt", 4))
+                    en.hp -= dmg
+                    if en.hp <= 0:
+                        en.active = False; self.score += 200
+                        if en.ai_type == AI_BOSS:
+                            self.won = True; self._emit_dma(); self._emit_sfx(self._find_sfx("clear", 5))
+                        else:
+                            self._emit_sfx(self._find_sfx("hurt", 4))
+                    else:
+                        self._emit_sfx(self._find_sfx("hurt", 4))
                     break
             if not en.active:
                 continue
-            # Player touch / melee
-            reach = 20 if self.melee_timer > 0 else 12
-            if abs(self.px - en.x) <= reach and abs(self.py - en.y) <= 12:
+            if abs(self.px - en.x) <= rad and abs(self.py - en.y) <= rad:
                 if self.melee_timer > 0:
-                    en.active = False
-                    self.score += 200
-                    self._emit_sfx(self._find_sfx("hurt", 4))
+                    en.active = False; self.score += 200; self._emit_sfx(self._find_sfx("hurt", 4))
                 else:
                     self._damage_respawn()
 
-        # Animation state selection
         self.anim_timer += 1
         if self.anim_lock == 0:
             if self.project.physics_mode == "platformer" and not self.on_ground:
@@ -404,41 +544,50 @@ class GamePlaytestEngine:
                 self.anim_name = "walk"
             else:
                 self.anim_name = "idle"
-
         self._update_camera()
 
     def _update_camera(self) -> None:
         prof = self.project.profile()
         vw, vh = int(prof["width"]), int(prof["height"])
-        lvl_w_px = self.project.level.width * 8
-        lvl_h_px = self.project.level.height * 8
-        self.cam_x = int(max(0, min(max(0, lvl_w_px - vw), int(self.px) - vw // 2 + 8)))
-        self.cam_y = int(max(0, min(max(0, lvl_h_px - vh), int(self.py) - vh // 2 + 8)))
+        lvl = self._active_room()
+        self.cam_x = int(max(0, min(max(0, lvl.width * 8 - vw), int(self.px) - vw // 2 + 8)))
+        self.cam_y = int(max(0, min(max(0, lvl.height * 8 - vh), int(self.py) - vh // 2 + 8)))
 
     def render_rgb(self) -> np.ndarray:
-        """Render exact hardware-resolution (H, W, 3) uint8 framebuffer."""
         prof = self.project.profile()
         vw, vh = int(prof["width"]), int(prof["height"])
         fb = np.empty((vh, vw, 3), dtype=np.uint8)
         bg_r, bg_g, bg_b = hex_to_rgb(self.project.bg_color_hex)
-        fb[:, :, 0] = bg_r
-        fb[:, :, 1] = bg_g
-        fb[:, :, 2] = bg_b
+        fb[:, :, 0] = bg_r; fb[:, :, 1] = bg_g; fb[:, :, 2] = bg_b
 
-        # Precompute palette RGB lookup tables
-        pal_rgbs: List[np.ndarray] = []
-        for pi in range(max(1, len(self.project.palettes))):
-            cols = self.project.get_palette_colors(pi)
-            arr = np.array([hex_to_rgb(c) for c in cols[:16]], dtype=np.uint8)
-            pal_rgbs.append(arr)
+        pal_rgbs = [np.array([hex_to_rgb(c) for c in self.project.get_palette_colors(pi)[:16]], dtype=np.uint8)
+                    for pi in range(max(1, len(self.project.palettes)))]
+        lvl = self._active_room()
 
-        # Draw visible BG tiles
-        lvl = self.project.level
-        tx0 = max(0, self.cam_x // 8)
-        tx1 = min(lvl.width, (self.cam_x + vw) // 8 + 1)
-        ty0 = max(0, self.cam_y // 8)
-        ty1 = min(lvl.height, (self.cam_y + vh) // 8 + 1)
+        # BG2 1/2-speed Parallax Backdrop (with subtle alpha blend!)
+        if lvl.parallax_enabled and 0 < lvl.parallax_tile_idx < len(self.project.tiles):
+            pt = self.project.tiles[lvl.parallax_tile_idx]
+            ppal = pal_rgbs[pt.palette_index % len(pal_rgbs)]
+            ppix = np.array(pt.pixels, dtype=np.uint8)
+            px_off = (self.cam_x // 2) % 32
+            py_off = (self.cam_y // 2) % 32
+            for sy in range(-py_off, vh, 32):
+                for sx in range(-px_off, vw, 32):
+                    y0, y1 = max(0, -sy), min(8, vh - sy)
+                    x0, x1 = max(0, -sx), min(8, vw - sx)
+                    if y0 < y1 and x0 < x1:
+                        sub = ppix[y0:y1, x0:x1]
+                        m = sub > 0
+                        if np.any(m):
+                            dst = fb[sy + y0: sy + y1, sx + x0: sx + x1]
+                            if self.project.alpha_blend_enabled:
+                                dst[m] = ((dst[m].astype(np.uint16) + ppal[sub[m]].astype(np.uint16)) // 2).astype(np.uint8)
+                            else:
+                                dst[m] = ppal[sub[m]]
 
+        # BG0 Visible Tiles
+        tx0, tx1 = max(0, self.cam_x // 8), min(lvl.width, (self.cam_x + vw) // 8 + 1)
+        ty0, ty1 = max(0, self.cam_y // 8), min(lvl.height, (self.cam_y + vh) // 8 + 1)
         for ty in range(ty0, ty1):
             row = self.cells[ty]
             sy0 = ty * 8 - self.cam_y
@@ -450,63 +599,54 @@ class GamePlaytestEngine:
                 pal = pal_rgbs[tile.palette_index % len(pal_rgbs)]
                 sx0 = tx * 8 - self.cam_x
                 pix = np.array(tile.pixels, dtype=np.uint8)
-                # Clip to screen
-                y_start = max(0, -sy0)
-                y_end = min(8, vh - sy0)
-                x_start = max(0, -sx0)
-                x_end = min(8, vw - sx0)
-                if y_start >= y_end or x_start >= x_end:
-                    continue
-                sub = pix[y_start:y_end, x_start:x_end]
-                mask = sub > 0
-                if np.any(mask):
-                    dst = fb[sy0 + y_start: sy0 + y_end, sx0 + x_start: sx0 + x_end]
-                    dst[mask] = pal[sub[mask]]
+                y0, y1 = max(0, -sy0), min(8, vh - sy0)
+                x0, x1 = max(0, -sx0), min(8, vw - sx0)
+                if y0 < y1 and x0 < x1:
+                    sub = pix[y0:y1, x0:x1]
+                    m = sub > 0
+                    if np.any(m):
+                        fb[sy0 + y0: sy0 + y1, sx0 + x0: sx0 + x1][m] = pal[sub[m]]
 
-        def blit_sprite(frame_grid: List[List[int]], sx: int, sy: int, pal_idx: int, hflip: bool = False) -> None:
+        def blit_sprite(frame_grid, sx: int, sy: int, pal_idx: int, hflip: bool = False) -> None:
             pal = pal_rgbs[pal_idx % len(pal_rgbs)]
             pix = np.array(frame_grid, dtype=np.uint8)
             if hflip:
                 pix = pix[:, ::-1]
             sh, sw = pix.shape
-            y0 = max(0, -sy)
-            y1 = min(sh, vh - sy)
-            x0 = max(0, -sx)
-            x1 = min(sw, vw - sx)
-            if y0 >= y1 or x0 >= x1:
-                return
-            sub = pix[y0:y1, x0:x1]
-            mask = sub > 0
-            if np.any(mask):
-                dst = fb[sy + y0: sy + y1, sx + x0: sx + x1]
-                dst[mask] = pal[sub[mask]]
+            y0, y1 = max(0, -sy), min(sh, vh - sy)
+            x0, x1 = max(0, -sx), min(sw, vw - sx)
+            if y0 < y1 and x0 < x1:
+                sub = pix[y0:y1, x0:x1]
+                m = sub > 0
+                if np.any(m):
+                    fb[sy + y0: sy + y1, sx + x0: sx + x1][m] = pal[sub[m]]
 
-        # Draw Enemies
         for en in self.enemies:
             if not en.active:
                 continue
-            sp_i = en.sprite_index if en.sprite_index < len(self.project.sprites) else 0
-            if sp_i < len(self.project.sprites) and self.project.sprites[sp_i].frames:
-                sp = self.project.sprites[sp_i]
-                fidx = ((self.frame >> 4) % len(sp.frames))
-                blit_sprite(sp.frames[fidx], int(en.x) - self.cam_x, int(en.y) - self.cam_y, sp.palette_index, en.direction < 0)
+            sp = self.project.sprites[en.sprite_index] if en.sprite_index < len(self.project.sprites) else self.project.sprites[0]
+            if sp.frames:
+                blit_sprite(sp.frames[(self.frame >> 4) % len(sp.frames)], int(en.x) - self.cam_x, int(en.y) - self.cam_y, sp.palette_index, en.direction < 0)
 
-        # Draw Projectiles
-        proj_sp = self.project.sprites[2] if len(self.project.sprites) > 2 else (self.project.sprites[0] if self.project.sprites else None)
+        proj_sp = next((s for s in self.project.sprites if s.role == "projectile"), self.project.sprites[0] if self.project.sprites else None)
         if proj_sp and proj_sp.frames:
             pf = proj_sp.frames[(self.frame >> 2) % len(proj_sp.frames)]
             for pr in self.projs:
                 if pr.active:
                     blit_sprite(pf, int(pr.x) - self.cam_x, int(pr.y) - self.cam_y, proj_sp.palette_index, pr.vx < 0)
 
-        # Draw Hero (blinks during invuln)
         if self.project.sprites and (self.invuln == 0 or (self.invuln & 4) == 0):
-            hero = self.project.sprites[0]
-            clip = hero.get_clip(self.anim_name)
-            fids = clip.frame_indices or [0]
-            ticks = max(2, int(round(60.0 / max(1, clip.fps))))
-            f_pos = (self.anim_timer // ticks) % len(fids)
-            fi = max(0, min(len(hero.frames) - 1, fids[f_pos]))
-            blit_sprite(hero.frames[fi], int(self.px) - self.cam_x, int(self.py) - self.cam_y, self.palette_idx, self.facing == 1)
+            if self.morphed:
+                mi = self.project.morph_sprite_index
+                msp = self.project.sprites[mi] if 0 <= mi < len(self.project.sprites) else self.project.sprites[0]
+                fr = msp.frames[(self.frame >> 2) % len(msp.frames)]
+                blit_sprite(fr, int(self.px) - self.cam_x, int(self.py) - self.cam_y, self.palette_idx, False)
+            else:
+                hero = self.project.sprites[0]
+                clip = hero.get_clip(self.anim_name)
+                fids = clip.frame_indices or [0]
+                ticks = max(2, int(round(60.0 / max(1, clip.fps))))
+                fi = max(0, min(len(hero.frames) - 1, fids[(self.anim_timer // ticks) % len(fids)]))
+                blit_sprite(hero.frames[fi], int(self.px) - self.cam_x, int(self.py) - self.cam_y, self.palette_idx, self.facing == 1)
 
         return fb
