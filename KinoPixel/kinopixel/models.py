@@ -78,20 +78,30 @@ TILE_DOOR = 8
 TILE_SAVE = 9
 TILE_UPGRADE = 10
 TILE_TERMINAL = 11
+TILE_SLOPE_L = 12     # 45-degree Up-Right Slope (/)
+TILE_SLOPE_R = 13     # 45-degree Down-Right Slope (\)
+TILE_WATER = 14       # Water / Low-Gravity Swim Zone
+TILE_LADDER = 15      # Climbable Ladder / Vine
+TILE_SWITCH = 16      # Trigger Switch (Sets World Flag!)
 
 TILE_TYPE_NAMES: Dict[int, str] = {
     TILE_EMPTY: "Empty / Passable",
     TILE_SOLID: "Solid Wall / Ground",
     TILE_ONEWAY: "One-Way Platform",
-    TILE_HAZARD: "Hazard / Spikes / Acid",
-    TILE_COIN: "Collectible / Energy",
-    TILE_GOAL: "Level Goal / Escape Pod",
+    TILE_HAZARD: "Hazard / Damage",
+    TILE_COIN: "Collectible / Pickup",
+    TILE_GOAL: "Stage Goal / Objective",
     TILE_BOUNCE: "Spring / Boost Pad",
-    TILE_BREAKABLE: "Destructible Block (Shot/Bomb)",
-    TILE_DOOR: "Room Door / Hatch Warp",
-    TILE_SAVE: "Save Station (GBA SRAM)",
-    TILE_UPGRADE: "Ability Upgrade Orb",
-    TILE_TERMINAL: "Nav Terminal (Dialogue)",
+    TILE_BREAKABLE: "Destructible Block",
+    TILE_DOOR: "Map Warp / Door / Portal",
+    TILE_SAVE: "Checkpoint / SRAM Save",
+    TILE_UPGRADE: "Key / Skill Unlock",
+    TILE_TERMINAL: "Dialogue Trigger / Sign",
+    TILE_SLOPE_L: "45° Slope Up-Right (/)",
+    TILE_SLOPE_R: "45° Slope Down-Right (\\)",
+    TILE_WATER: "Water / Low-Gravity Zone",
+    TILE_LADDER: "Climbable Ladder / Vine",
+    TILE_SWITCH: "World Switch (Sets Flag)",
 }
 
 TILE_TYPE_COLORS: Dict[int, str] = {
@@ -107,40 +117,70 @@ TILE_TYPE_COLORS: Dict[int, str] = {
     TILE_SAVE: "#10B98199",
     TILE_UPGRADE: "#FDE04799",
     TILE_TERMINAL: "#818CF899",
+    TILE_SLOPE_L: "#60A5FA77",
+    TILE_SLOPE_R: "#60A5FA77",
+    TILE_WATER: "#0EA5E966",
+    TILE_LADDER: "#D9770677",
+    TILE_SWITCH: "#E879F988",
 }
 
-# Metroidvania Ability Bitmasks (compiled 1:1 into GBA IWRAM ST_ABILITIES!)
-ABIL_NONE = 0x00
-ABIL_MORPH_BALL = 0x01
-ABIL_MISSILES = 0x02
-ABIL_HIGH_JUMP = 0x04
-ABIL_WALL_JUMP = 0x08
-ABIL_SPEED_DASH = 0x10
-
-ABILITY_NAMES: Dict[int, str] = {
-    ABIL_NONE: "None (Always Open)",
-    ABIL_MORPH_BALL: "Morph Ball",
-    ABIL_MISSILES: "Missiles / Bombs",
-    ABIL_HIGH_JUMP: "High Jump Boots",
-    ABIL_WALL_JUMP: "Wall-Jump Grip",
-    ABIL_SPEED_DASH: "Speed Booster Dash",
+# Universal Game Genre / Physics Modes (compiled 1:1 into GBA ROM!)
+PHYSICS_MODES: Dict[str, int] = {
+    "platformer": 0,   # Side-view gravity, slopes, water swim, ladders, wall-jump
+    "topdown": 1,      # 4-way Zelda / Pokémon Adventure RPG
+    "shmup": 2,        # 8-way Space Shooter / Gradius free-flight
+    "tactical": 3,     # Tile-snapped Turn-Based / Grid Tactics
 }
 
-# Enemy AI types (numeric codes compiled 1:1 into GBA ROM!)
+# Universal Entity / Boss AI Archetypes & Attack Patterns (compiled into Behavior VM!)
 AI_PATROL = 0
-AI_CHASER = 1   # SA-X / Stalker pursues player!
+AI_CHASER = 1   # Stalker / Chaser pursues player X & Y!
 AI_TURRET = 2   # Fires plasma shots at player!
-AI_BOSS = 3     # 32x32 Multi-HP Boss with leaps + plasma + portal drop!
+AI_BOSS = 3     # 32x32 Multi-Phase Boss (switches to Phase 2 Spread/Dash under 50% HP!)
+AI_SINE = 4     # Sine-wave Hover / Medusa Head / Shmup Squadron!
+AI_NPC = 5      # Friendly RPG NPC (non-hostile, triggers Dialogue on contact/interact!)
 
 AI_TYPE_NAMES: Dict[int, str] = {
     AI_PATROL: "Patrol (Walks L/R)",
     AI_CHASER: "Stalker / Chaser (Pursues Hero)",
-    AI_TURRET: "Plasma Turret (Fires Shots)",
-    AI_BOSS: "32×32 Boss (Multi-HP + Plasma + Leap)",
+    AI_TURRET: "Plasma Turret (Aimed Shots)",
+    AI_BOSS: "32×32 Multi-Phase Boss (Spread + Leap)",
+    AI_SINE: "Sine Hover / Swooper (Medusa / Shmup)",
+    AI_NPC: "Friendly NPC (Triggers Dialogue)",
 }
 
-# Supported GBA hardware metasprite sizes
-SPRITE_SIZES: List[Tuple[int, int]] = [(16, 16), (16, 32), (32, 32)]
+# Universal Button Rule Condition Types (compiled into GBA ROM!)
+COND_ALWAYS = 0
+COND_VAR_POS = 1      # Only triggers if VAR[cond_idx] > 0 (e.g., Missiles > 0, MP > 0!)
+COND_FLAG_SET = 2     # Only triggers if World Flag[cond_idx] is set!
+COND_ABIL_OWNED = 3   # Only triggers if Ability bitmask is unlocked!
+
+COND_NAMES: Dict[int, str] = {
+    COND_ALWAYS: "Always",
+    COND_VAR_POS: "If Var > 0 (Ammo/MP)",
+    COND_FLAG_SET: "If World Flag Set",
+    COND_ABIL_OWNED: "If Ability Unlocked",
+}
+
+# Universal Unlockable Capability / Key Bitmasks (compiled 1:1 into GBA IWRAM ST_ABILITIES!)
+ABIL_NONE = 0x00
+ABIL_MORPH_BALL = 0x01  # Alias for Alt Form / Compact Hitbox
+ABIL_MISSILES = 0x02    # Alias for Key / Heavy Skill Flag 2
+ABIL_HIGH_JUMP = 0x04   # Alias for High Boost Flag 3
+ABIL_WALL_JUMP = 0x08   # Alias for Wall Grip Flag 4
+ABIL_SPEED_DASH = 0x10  # Alias for Dash Boost Flag 5
+
+ABILITY_NAMES: Dict[int, str] = {
+    ABIL_NONE: "None (Always Open)",
+    ABIL_MORPH_BALL: "Skill 1 — Alt Form / Compact Hitbox",
+    ABIL_MISSILES: "Skill 2 — Heavy Weapon / Key",
+    ABIL_HIGH_JUMP: "Skill 3 — High Jump / Boost",
+    ABIL_WALL_JUMP: "Skill 4 — Wall-Jump Grip",
+    ABIL_SPEED_DASH: "Skill 5 — Dash / Speed Boost",
+}
+
+# Supported GBA hardware metasprite sizes (Square, Tall, Wide, Giant Boss!)
+SPRITE_SIZES: List[Tuple[int, int]] = [(16, 16), (16, 32), (32, 16), (32, 32), (64, 64)]
 
 # Button wiring triggers & actions (numeric codes compile 1:1 into GBA ROM!)
 TRIGGER_HELD = 0
@@ -170,25 +210,29 @@ ACTION_MORPH_BALL = 14
 ACTION_AIM_UP = 15
 ACTION_BOMB = 16
 ACTION_INTERACT = 17
+ACTION_SUPER_BURST = 18  # 3-Way Heavy Spread + Screen Shake + DMA (Energy Wave / Finger Lasers / CO Power!)
+ACTION_HEAL = 19         # Restore +1 HP (Senzu / Potion / Repair / Energy Tank!)
 
 ACTION_NAMES: Dict[int, str] = {
     ACTION_MOVE_LEFT: "Move Left",
     ACTION_MOVE_RIGHT: "Move Right",
-    ACTION_MOVE_UP: "Move Up / Aim Up",
-    ACTION_MOVE_DOWN: "Move Down / Crouch",
-    ACTION_JUMP: "Jump / Wall-Jump",
-    ACTION_DASH: "Speed Dash Burst",
-    ACTION_SHOOT: "Fire Arm Cannon (8-Way Aim)",
-    ACTION_MELEE: "Spin / Melee Slash",
-    ACTION_PALETTE_NEXT: "Cycle Suit Palette",
+    ACTION_MOVE_UP: "Move Up / Aim Up / Climb",
+    ACTION_MOVE_DOWN: "Move Down / Crouch / Climb",
+    ACTION_JUMP: "Jump / Swim / Wall-Jump",
+    ACTION_DASH: "Speed Dash / Dodge Burst",
+    ACTION_SHOOT: "Fire Projectile (8-Way Aim)",
+    ACTION_MELEE: "Melee Slash / Strike",
+    ACTION_PALETTE_NEXT: "Cycle Sprite Palette",
     ACTION_PLAY_SFX: "Play Chiptune SFX",
     ACTION_SWITCH_ANIM: "Play Sprite Animation",
     ACTION_RESET_LEVEL: "Restart Stage",
-    ACTION_PAUSE: "Pause / Resume Game",
-    ACTION_MORPH_BALL: "Toggle Morph Ball (Shrink Hitbox)",
+    ACTION_PAUSE: "Pause & Auto-Minimap",
+    ACTION_MORPH_BALL: "Toggle Alt Form (Swap Sprite & Hitbox)",
     ACTION_AIM_UP: "Hold Aim Up / Diagonal 45°",
-    ACTION_BOMB: "Drop Morph Bomb / Fire Missile",
-    ACTION_INTERACT: "Use Nav Terminal / Save Station",
+    ACTION_BOMB: "Fire Heavy Shot / Blast",
+    ACTION_INTERACT: "Interact / Talk / Examine",
+    ACTION_SUPER_BURST: "Super Burst (3-Way + Shake + DMA)",
+    ACTION_HEAL: "Heal / Repair (+1 HP)",
 }
 
 # Built-in authentic palettes (16 colors each; index 0 is transparent for sprites / backdrop for BG)
@@ -389,14 +433,16 @@ class TileAsset:
 @dataclass
 class EntityPlacement:
     uid: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    kind: str = "enemy"     # enemy | boss
+    kind: str = "enemy"     # enemy | boss | npc
     ai_type: int = AI_PATROL
     sprite_index: int = 1
     tile_x: int = 10
     tile_y: int = 12
     patrol_range: int = 4   # tiles
     speed: int = 1          # px per 2 frames
-    hp: int = 1             # >1 for tough enemies & multi-HP bosses!
+    hp: int = 1             # >1 for tough enemies & multi-phase bosses!
+    phase2_hp: int = 6      # HP threshold where Boss enters Phase 2 (3-way spread + fast dash!)
+    defeat_flag: int = 0    # World Flag bit (0..31) set upon defeat (unlocks doors/events!)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -409,6 +455,8 @@ class EntityPlacement:
             "patrol_range": int(self.patrol_range),
             "speed": int(self.speed),
             "hp": int(self.hp),
+            "phase2_hp": int(self.phase2_hp),
+            "defeat_flag": int(self.defeat_flag),
         }
 
     @classmethod
@@ -423,6 +471,8 @@ class EntityPlacement:
             patrol_range=int(d.get("patrol_range", 4)),
             speed=int(d.get("speed", 1)),
             hp=max(1, int(d.get("hp", 1))),
+            phase2_hp=max(0, int(d.get("phase2_hp", 6))),
+            defeat_flag=max(0, min(31, int(d.get("defeat_flag", 0)))),
         )
 
 
@@ -466,13 +516,17 @@ class LevelMap:
     name: str = "Stage 1 — Starbit Meadow"
     width: int = 48   # tiles (max 64)
     height: int = 20  # tiles (max 32)
+    world_x: int = 0  # Minimap grid X (0..15)
+    world_y: int = 0  # Minimap grid Y (0..7)
     spawn_x: int = 3
     spawn_y: int = 14
     cells: List[List[int]] = field(default_factory=lambda: empty_grid(48, 20, 0))
     entities: List[EntityPlacement] = field(default_factory=list)
     doors: List[DoorLink] = field(default_factory=list)
     dialogue_text: str = "ADAM: SCAN SECTOR AND FIND UPGRADES!"
+    dialogue_page2: str = "PRESS START ANYTIME FOR SECTOR MINIMAP."
     upgrade_ability: int = ABIL_MORPH_BALL
+    switch_flag: int = 1        # World Flag bit (0..31) toggled by TILE_SWITCH in this room
     parallax_enabled: bool = True
     parallax_tile_idx: int = 8  # BG tile tiled onto BG2 at 1/2 camera speed!
 
@@ -496,13 +550,17 @@ class LevelMap:
             "name": self.name,
             "width": int(self.width),
             "height": int(self.height),
+            "world_x": int(self.world_x),
+            "world_y": int(self.world_y),
             "spawn_x": int(self.spawn_x),
             "spawn_y": int(self.spawn_y),
             "cells": self.cells,
             "entities": [e.to_dict() for e in self.entities],
             "doors": [d.to_dict() for d in self.doors],
-            "dialogue_text": self.dialogue_text[:52],
+            "dialogue_text": self.dialogue_text[:48],
+            "dialogue_page2": self.dialogue_page2[:48],
             "upgrade_ability": int(self.upgrade_ability),
+            "switch_flag": int(self.switch_flag),
             "parallax_enabled": bool(self.parallax_enabled),
             "parallax_tile_idx": int(self.parallax_tile_idx),
         }
@@ -516,13 +574,17 @@ class LevelMap:
             name=str(d.get("name", "Stage 1")),
             width=w,
             height=h,
+            world_x=max(0, min(15, int(d.get("world_x", 0)))),
+            world_y=max(0, min(7, int(d.get("world_y", 0)))),
             spawn_x=int(d.get("spawn_x", 3)),
             spawn_y=int(d.get("spawn_y", 14)),
             cells=cells,
             entities=[EntityPlacement.from_dict(e) for e in d.get("entities", [])],
             doors=[DoorLink.from_dict(dr) for dr in d.get("doors", [])],
-            dialogue_text=str(d.get("dialogue_text", "ADAM: SCAN SECTOR AND FIND UPGRADES!"))[:52],
+            dialogue_text=str(d.get("dialogue_text", "ADAM: SCAN SECTOR AND FIND UPGRADES!"))[:48],
+            dialogue_page2=str(d.get("dialogue_page2", "PRESS START ANYTIME FOR SECTOR MINIMAP."))[:48],
             upgrade_ability=int(d.get("upgrade_ability", ABIL_MORPH_BALL)),
+            switch_flag=max(0, min(31, int(d.get("switch_flag", 1)))),
             parallax_enabled=bool(d.get("parallax_enabled", True)),
             parallax_tile_idx=int(d.get("parallax_tile_idx", 8)),
         )
@@ -538,6 +600,10 @@ class ButtonRule:
     anim_name: str = "jump"
     sfx_index: int = 0
     enabled: bool = True
+    # v3.0 Universal Conditional & Variable Wiring (Ammo / MP / Keys / Flags!)
+    cond_type: int = COND_ALWAYS  # COND_ALWAYS | COND_VAR_POS | COND_FLAG_SET | COND_ABIL_OWNED
+    cond_idx: int = 0             # Var index (0..15) / Flag bit (0..31) / Ability bit
+    var_delta: int = 0            # Signed change to VAR[cond_idx] on trigger (e.g., -1 missile!)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -549,6 +615,9 @@ class ButtonRule:
             "anim_name": self.anim_name,
             "sfx_index": int(self.sfx_index),
             "enabled": bool(self.enabled),
+            "cond_type": int(self.cond_type),
+            "cond_idx": int(self.cond_idx),
+            "var_delta": int(self.var_delta),
         }
 
     @classmethod
@@ -562,6 +631,9 @@ class ButtonRule:
             anim_name=str(d.get("anim_name", "")),
             sfx_index=int(d.get("sfx_index", -1)),
             enabled=bool(d.get("enabled", True)),
+            cond_type=int(d.get("cond_type", COND_ALWAYS)),
+            cond_idx=int(d.get("cond_idx", 0)),
+            var_delta=int(d.get("var_delta", 0)),
         )
 
 
@@ -670,6 +742,7 @@ class KinoPixelProject:
     alpha_blend_enabled: bool = True    # Hardware REG_BLDCNT / REG_BLDALPHA on BG2 parallax
     sram_save_enabled: bool = True      # Real GBA Cartridge SRAM (0x0E000000 + SRAM_V113)
     starting_abilities: int = ABIL_WALL_JUMP
+    starting_vars: List[int] = field(default_factory=lambda: [10, 0, 0, 0, 0, 0, 0, 0])  # VAR[0]=Ammo/MP, VAR[1]=Gold/Keys, etc.
     morph_sprite_index: int = -1        # Optional dedicated 16x16 Morph Ball sprite index
     palettes: List[List[str]] = field(default_factory=list)
     sprites: List[SpriteAsset] = field(default_factory=list)
@@ -769,6 +842,7 @@ class KinoPixelProject:
         self.alpha_blend_enabled = fresh.alpha_blend_enabled
         self.sram_save_enabled = fresh.sram_save_enabled
         self.starting_abilities = fresh.starting_abilities
+        self.starting_vars = list(fresh.starting_vars)
         self.morph_sprite_index = fresh.morph_sprite_index
         self.palettes = fresh.palettes
         self.sprites = fresh.sprites
@@ -795,6 +869,7 @@ class KinoPixelProject:
             "alpha_blend_enabled": bool(self.alpha_blend_enabled),
             "sram_save_enabled": bool(self.sram_save_enabled),
             "starting_abilities": int(self.starting_abilities),
+            "starting_vars": [int(v) for v in self.starting_vars[:8]],
             "morph_sprite_index": int(self.morph_sprite_index),
             "palettes": [list(p) for p in self.palettes],
             "sprites": [s.to_dict() for s in self.sprites],
@@ -828,6 +903,7 @@ class KinoPixelProject:
             alpha_blend_enabled=bool(d.get("alpha_blend_enabled", True)),
             sram_save_enabled=bool(d.get("sram_save_enabled", True)),
             starting_abilities=int(d.get("starting_abilities", ABIL_WALL_JUMP)),
+            starting_vars=[int(v) for v in d.get("starting_vars", [10, 0, 0, 0, 0, 0, 0, 0])][:8],
             morph_sprite_index=int(d.get("morph_sprite_index", -1)),
             palettes=[list(p) for p in d.get("palettes", [list(PRESET_PALETTES["GBA Starbit Retro"])])],
             sprites=[SpriteAsset.from_dict(s) for s in d.get("sprites", [])],

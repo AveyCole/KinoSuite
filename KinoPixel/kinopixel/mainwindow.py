@@ -290,7 +290,15 @@ class KinoPixelWindow(QMainWindow):
 
         m_file = mb.addMenu("&File")
         m_tpl = m_file.addMenu("New from Starter Template")
-        for tpl in ["GBA Metroidvania (BSL Sector)", "GBA Platformer", "GBA Top-Down RPG", "GBC Adventure", "GB Classic (DMG)"]:
+        for tpl in [
+            "GBA Platformer (Starbit)",
+            "GBA Sci-Fi Exploration (BSL Sector)",
+            "GBA Action-RPG (Legacy Quest)",
+            "GBA Space Action (Omega Wing)",
+            "GBA Tactical Grid (Advance Ops)",
+            "GBC Adventure",
+            "GB Classic (DMG)",
+        ]:
             m_tpl.addAction(tpl, lambda _=False, t=tpl: self._add_project_tab(create_starter_project(t)))
         m_file.addAction(self._act("Open Project (.kpx)...", self.open_file_dialog, "Ctrl+O"))
         m_file.addAction(self._act("Save Project", self.save_project, "Ctrl+S"))
@@ -451,7 +459,15 @@ class KinoPixelWindow(QMainWindow):
 
     def new_project_dialog(self) -> None:
         from PySide6.QtWidgets import QInputDialog
-        tpls = ["GBA Metroidvania (BSL Sector)", "GBA Platformer", "GBA Top-Down RPG", "GBC Adventure", "GB Classic (DMG)"]
+        tpls = [
+            "GBA Platformer (Starbit)",
+            "GBA Sci-Fi Exploration (BSL Sector)",
+            "GBA Action-RPG (Legacy Quest)",
+            "GBA Space Action (Omega Wing)",
+            "GBA Tactical Grid (Advance Ops)",
+            "GBC Adventure",
+            "GB Classic (DMG)",
+        ]
         choice, ok = QInputDialog.getItem(self, "New KinoPixel Game", "Choose Starter Template:", tpls, 0, False)
         if ok and choice:
             self._add_project_tab(create_starter_project(choice))
@@ -539,9 +555,11 @@ class KinoPixelWindow(QMainWindow):
             self,
             "About KinoPixel — KinoSuite",
             f"<h2 style='color:#A78BFA;'>KinoPixel v{__version__}</h2>"
-            "<p><b>KinoSuite Retro Handheld Game Creation Studio (GB / GBC / GBA)</b></p>"
-            "<p>Start-to-finish sprite pixel art, multi-frame animation, 8×8 tile &amp; level design, "
-            "visual button wiring, hardware PSG chiptune SFX, live 60fps playtesting, and a built-in "
-            "pure-Python ARM7TDMI compiler that produces real, bootable, playable <code>.gba</code> ROMs "
-            "(plus native <code>.gb</code> / <code>.gbc</code> and C header exports) with zero external toolchain.</p>",
+            "<p><b>KinoSuite Universal GB / GBC / GBA Game Creation Studio</b></p>"
+            "<p>Start-to-finish pixel art &amp; multi-size metasprites (16×16 to 64×64), multi-room "
+            "worlds (up to 128 maps with slopes, water, ladders, switches &amp; BG2 parallax), "
+            "4 native physics modes (Platformer, Action-RPG, Space Action, Tactical Grid), "
+            "conditional button &amp; variable wiring, 5-voice Sequence Genie + DMA audio, "
+            "live 60fps playtesting, native ARM7TDMI <code>.gba</code> ROM compilation (plus "
+            "<code>.gb</code>/<code>.gbc</code> and full <code>devkitARM</code> C asset export).</p>",
         )

@@ -48,6 +48,7 @@ from .models import (
     ACTION_AIM_UP,
     ACTION_BOMB,
     ACTION_DASH,
+    ACTION_HEAL,
     ACTION_JUMP,
     ACTION_MELEE,
     ACTION_MORPH_BALL,
@@ -60,11 +61,14 @@ from .models import (
     ACTION_PAUSE,
     ACTION_RESET_LEVEL,
     ACTION_SHOOT,
+    ACTION_SUPER_BURST,
     AI_BOSS,
     AI_TYPE_NAMES,
     AnimationClip,
     BUTTON_ORDER,
     ButtonRule,
+    COND_NAMES,
+    COND_VAR_POS,
     DoorLink,
     KinoPixelProject,
     LevelMap,
@@ -127,7 +131,7 @@ class SpriteEditorPage(QWidget):
         ll.setContentsMargins(8, 8, 8, 8)
         ll.setSpacing(6)
 
-        h1 = QLabel("METASPRITES (16×16 / 16×32 / 32×32)")
+        h1 = QLabel("METASPRITES (16×16 TO 64×64)")
         h1.setObjectName("SectionHeader")
         ll.addWidget(h1)
 
@@ -148,8 +152,15 @@ class SpriteEditorPage(QWidget):
         sz_row = QHBoxLayout()
         sz_row.addWidget(QLabel("Size:"))
         self.cmb_sp_size = QComboBox()
+        size_tags = {
+            (16, 16): "Standard",
+            (16, 32): "Tall Character",
+            (32, 16): "Wide Vehicle",
+            (32, 32): "Large / Boss",
+            (64, 64): "Giant Boss",
+        }
         for sw, sh in SPRITE_SIZES:
-            tag = "Tall Hero" if (sw == 16 and sh == 32) else ("Boss" if sw == 32 else "Standard")
+            tag = size_tags.get((sw, sh), "Custom")
             self.cmb_sp_size.addItem(f"{sw}×{sh} ({tag})", (sw, sh))
         self.cmb_sp_size.currentIndexChanged.connect(self._on_sprite_size_changed)
         sz_row.addWidget(self.cmb_sp_size, 1)
@@ -746,42 +757,65 @@ class LevelEditorPage(QWidget):
         right = QVBoxLayout()
         right.setSpacing(6)
 
-        # Multi-Room World & Metroidvania Bar
+        # Multi-Room World & Map Metadata Bar (up to 128 rooms!)
         wbar = QWidget()
         wbar.setObjectName("CardFrame")
-        wl = QHBoxLayout(wbar)
+        wl = QGridLayout(wbar)
         wl.setContentsMargins(8, 5, 8, 5)
-        wl.setSpacing(6)
-        wl.addWidget(QLabel("Room:"))
+        wl.setHorizontalSpacing(6)
+        wl.setVerticalSpacing(4)
+        wl.addWidget(QLabel("Room:"), 0, 0)
         self.cmb_room = QComboBox()
-        self.cmb_room.setMinimumWidth(160)
+        self.cmb_room.setMinimumWidth(155)
         self.cmb_room.currentIndexChanged.connect(self._on_room_selected)
-        wl.addWidget(self.cmb_room)
+        wl.addWidget(self.cmb_room, 0, 1)
         b_add_rm = QPushButton("+ Room")
         b_add_rm.clicked.connect(self._add_room)
-        wl.addWidget(b_add_rm)
-        b_door = QPushButton("+ Link Door")
+        wl.addWidget(b_add_rm, 0, 2)
+        b_door = QPushButton("+ Link Warp")
         b_door.clicked.connect(self._link_door_dialog)
-        wl.addWidget(b_door)
+        wl.addWidget(b_door, 0, 3)
 
-        wl.addWidget(QLabel("Upgrade:"))
+        wl.addWidget(QLabel("Map X/Y:"), 0, 4)
+        xy_row = QHBoxLayout()
+        xy_row.setSpacing(3)
+        self.sp_wx = QSpinBox()
+        self.sp_wx.setRange(0, 15)
+        self.sp_wx.setFixedWidth(48)
+        self.sp_wx.valueChanged.connect(self._on_room_meta_changed)
+        self.sp_wy = QSpinBox()
+        self.sp_wy.setRange(0, 7)
+        self.sp_wy.setFixedWidth(48)
+        self.sp_wy.valueChanged.connect(self._on_room_meta_changed)
+        xy_row.addWidget(self.sp_wx)
+        xy_row.addWidget(self.sp_wy)
+        wl.addLayout(xy_row, 0, 5)
+
+        wl.addWidget(QLabel("Unlock:"), 0, 6)
         self.cmb_upg = QComboBox()
         for k, v in ABILITY_NAMES.items():
             self.cmb_upg.addItem(v, k)
         self.cmb_upg.currentIndexChanged.connect(self._on_room_meta_changed)
-        wl.addWidget(self.cmb_upg)
+        wl.addWidget(self.cmb_upg, 0, 7)
 
         self.cb_par = QCheckBox("BG2 Parallax")
         self.cb_par.setChecked(True)
         self.cb_par.toggled.connect(self._on_room_meta_changed)
-        wl.addWidget(self.cb_par)
+        wl.addWidget(self.cb_par, 0, 8)
 
-        wl.addWidget(QLabel("Nav Text:"))
+        wl.addWidget(QLabel("Dialogue P1:"), 1, 0)
         self.ed_dlg = QLineEdit()
         self.ed_dlg.setMaxLength(48)
-        self.ed_dlg.setPlaceholderText("ADAM: MISSION BRIEFING...")
+        self.ed_dlg.setPlaceholderText("Dialogue / Signpost Page 1 (48 chars)...")
         self.ed_dlg.editingFinished.connect(self._on_room_meta_changed)
-        wl.addWidget(self.ed_dlg, 1)
+        wl.addWidget(self.ed_dlg, 1, 1, 1, 3)
+
+        wl.addWidget(QLabel("Page 2:"), 1, 4)
+        self.ed_dlg2 = QLineEdit()
+        self.ed_dlg2.setMaxLength(48)
+        self.ed_dlg2.setPlaceholderText("Optional Page 2 (press A to advance)...")
+        self.ed_dlg2.editingFinished.connect(self._on_room_meta_changed)
+        wl.addWidget(self.ed_dlg2, 1, 5, 1, 4)
         right.addWidget(wbar)
 
         bar = QWidget()
@@ -797,7 +831,7 @@ class LevelEditorPage(QWidget):
             ("eraser", "Erase"),
             ("eyedropper", "Pick"),
             ("spawn", "Set Spawn"),
-            ("enemy", "Place Enemy"),
+            ("enemy", "Place Entity"),
         ]:
             b = QPushButton(lbl)
             b.setCheckable(True)
@@ -806,11 +840,19 @@ class LevelEditorPage(QWidget):
             bl.addWidget(b)
         self.map_tool_btns["brush"].setChecked(True)
 
-        bl.addSpacing(8)
+        self.cmb_ai = QComboBox()
+        for k, v in AI_TYPE_NAMES.items():
+            self.cmb_ai.addItem(v.split(" (")[0], k)
+        self.cmb_ai.currentIndexChanged.connect(lambda: setattr(self.map_canvas, "selected_ai", int(self.cmb_ai.currentData())))
+        bl.addWidget(self.cmb_ai)
+
+        bl.addSpacing(6)
         bl.addWidget(QLabel("Physics:"))
         self.cmb_phys = QComboBox()
-        self.cmb_phys.addItem("Platformer (Gravity)", "platformer")
-        self.cmb_phys.addItem("Top-Down (4-Way RPG)", "topdown")
+        self.cmb_phys.addItem("Platformer (Slopes/Water)", "platformer")
+        self.cmb_phys.addItem("Top-Down RPG (4-Way)", "topdown")
+        self.cmb_phys.addItem("Space Action (8-Way)", "shmup")
+        self.cmb_phys.addItem("Tactical Grid (16px Step)", "tactical")
         self.cmb_phys.currentIndexChanged.connect(self._on_physics_changed)
         bl.addWidget(self.cmb_phys)
 
@@ -856,6 +898,12 @@ class LevelEditorPage(QWidget):
         self.cmb_room.blockSignals(False)
 
         cur_rm = self.project.level
+        self.sp_wx.blockSignals(True)
+        self.sp_wx.setValue(cur_rm.world_x)
+        self.sp_wx.blockSignals(False)
+        self.sp_wy.blockSignals(True)
+        self.sp_wy.setValue(cur_rm.world_y)
+        self.sp_wy.blockSignals(False)
         self.cmb_upg.blockSignals(True)
         ui = self.cmb_upg.findData(cur_rm.upgrade_ability)
         if ui >= 0:
@@ -867,9 +915,13 @@ class LevelEditorPage(QWidget):
         self.ed_dlg.blockSignals(True)
         self.ed_dlg.setText(cur_rm.dialogue_text)
         self.ed_dlg.blockSignals(False)
+        self.ed_dlg2.blockSignals(True)
+        self.ed_dlg2.setText(cur_rm.dialogue_page2)
+        self.ed_dlg2.blockSignals(False)
 
         self.cmb_phys.blockSignals(True)
-        self.cmb_phys.setCurrentIndex(1 if self.project.physics_mode == "topdown" else 0)
+        pi = self.cmb_phys.findData(self.project.physics_mode)
+        self.cmb_phys.setCurrentIndex(max(0, pi))
         self.cmb_phys.blockSignals(False)
 
         self.lst_tiles.blockSignals(True)
@@ -961,7 +1013,7 @@ class LevelEditorPage(QWidget):
             self.refresh_all()
 
     def _add_room(self) -> None:
-        if not self.project or len(self.project.rooms) >= 16:
+        if not self.project or len(self.project.rooms) >= 128:
             return
         n = len(self.project.rooms) + 1
         w, h = 40, 20
@@ -970,16 +1022,16 @@ class LevelEditorPage(QWidget):
             cells[0][x] = 9; cells[h - 2][x] = 2; cells[h - 1][x] = 9
         for y in range(h):
             cells[y][0] = 9; cells[y][w - 1] = 9
-        self.project.rooms.append(LevelMap(name=f"Sector {n}", width=w, height=h, spawn_x=3, spawn_y=h - 5, cells=cells))
+        self.project.rooms.append(LevelMap(name=f"Area {n}", width=w, height=h, world_x=(n - 1) % 16, world_y=((n - 1) // 16) % 8, spawn_x=3, spawn_y=h - 5, cells=cells))
         self.project.active_room_idx = len(self.project.rooms) - 1
         self.refresh_all()
-        self.projectModified.emit(f"Add Room (Sector {n})")
+        self.projectModified.emit(f"Add Room (Area {n})")
 
     def _link_door_dialog(self) -> None:
         if not self.project:
             return
         rm_names = [f"R{i + 1}: {r.name}" for i, r in enumerate(self.project.rooms)]
-        choice, ok = QInputDialog.getItem(self, "Link Hatch Door", "Target Destination Room:", rm_names, 0, False)
+        choice, ok = QInputDialog.getItem(self, "Link Map Warp", "Target Destination Room:", rm_names, 0, False)
         if not ok:
             return
         target_idx = rm_names.index(choice)
@@ -989,15 +1041,18 @@ class LevelEditorPage(QWidget):
         lvl.set_tile(tx, ty, 11 if len(self.project.tiles) > 11 else 7)
         lvl.doors.append(DoorLink(tile_x=tx, tile_y=ty, target_room=target_idx, target_x=3, target_y=max(2, self.project.rooms[target_idx].height - 6)))
         self.map_canvas.update()
-        self.projectModified.emit(f"Link Door to R{target_idx + 1}")
+        self.projectModified.emit(f"Link Warp to R{target_idx + 1}")
 
     def _on_room_meta_changed(self) -> None:
         if not self.project:
             return
         rm = self.project.level
+        rm.world_x = self.sp_wx.value()
+        rm.world_y = self.sp_wy.value()
         rm.upgrade_ability = int(self.cmb_upg.currentData())
         rm.parallax_enabled = self.cb_par.isChecked()
         rm.dialogue_text = self.ed_dlg.text().strip().upper()[:48]
+        rm.dialogue_page2 = self.ed_dlg2.text().strip().upper()[:48]
         self.projectModified.emit("Update Room Settings")
 
 
@@ -1029,29 +1084,32 @@ class ButtonWiringPage(QWidget):
         left.addWidget(self.diagram, 1)
 
         preset_box = QGroupBox("One-Click Control Schemes")
-        pl = QHBoxLayout(preset_box)
-        b_plat = QPushButton("Platformer")
-        b_plat.clicked.connect(lambda: self._apply_scheme("platformer"))
-        b_rpg = QPushButton("Top-Down RPG")
-        b_rpg.clicked.connect(lambda: self._apply_scheme("topdown"))
-        b_act = QPushButton("Action Blaster")
-        b_act.clicked.connect(lambda: self._apply_scheme("shooter"))
-        b_met = QPushButton("Metroidvania")
-        b_met.setObjectName("PrimaryButton")
-        b_met.clicked.connect(lambda: self._apply_scheme("metroidvania"))
-        pl.addWidget(b_plat)
-        pl.addWidget(b_rpg)
-        pl.addWidget(b_act)
-        pl.addWidget(b_met)
+        pl = QGridLayout(preset_box)
+        for idx, (lbl, key) in enumerate([
+            ("Platformer", "platformer"),
+            ("Action-RPG", "topdown"),
+            ("Space Action", "shmup"),
+            ("Tactical Grid", "tactical"),
+            ("Exploration Action", "exploration"),
+        ]):
+            b = QPushButton(lbl)
+            b.clicked.connect(lambda _=False, k=key: self._apply_scheme(k))
+            pl.addWidget(b, idx // 3, idx % 3)
         left.addWidget(preset_box)
         root.addLayout(left, 2)
 
-        # Right: Visual Rule Cards
+        # Right: Visual Rule Cards + Conditional Variable Controls
         right = QVBoxLayout()
         hdr = QHBoxLayout()
-        self.lbl_rules_hdr = QLabel("BUTTON WIRING RULES — ALL BUTTONS")
+        self.lbl_rules_hdr = QLabel("BUTTON & EVENT WIRING RULES — ALL BUTTONS")
         self.lbl_rules_hdr.setObjectName("SectionHeader")
         hdr.addWidget(self.lbl_rules_hdr, 1)
+        hdr.addWidget(QLabel("Start Var[0]:"))
+        self.sp_start_v0 = QSpinBox()
+        self.sp_start_v0.setRange(0, 99)
+        self.sp_start_v0.setToolTip("Starting value for Game Variable #0 (Ammo / Ki / MP / Funds)")
+        self.sp_start_v0.valueChanged.connect(self._on_start_var0_changed)
+        hdr.addWidget(self.sp_start_v0)
         b_add = QPushButton("+ Add Button Wire")
         b_add.setObjectName("PrimaryButton")
         b_add.clicked.connect(self._add_rule)
@@ -1083,8 +1141,19 @@ class ButtonWiringPage(QWidget):
     def refresh_all(self) -> None:
         if not self.project:
             return
+        self.sp_start_v0.blockSignals(True)
+        self.sp_start_v0.setValue(int(self.project.starting_vars[0]) if self.project.starting_vars else 10)
+        self.sp_start_v0.blockSignals(False)
         self.diagram.set_project(self.project)
         self._rebuild_cards()
+
+    def _on_start_var0_changed(self, v: int) -> None:
+        if self.project:
+            if not self.project.starting_vars:
+                self.project.starting_vars = [v, 0, 0, 0, 0, 0, 0, 0]
+            else:
+                self.project.starting_vars[0] = v
+            self.projectModified.emit("Edit Starting Var[0]")
 
     def _rebuild_cards(self) -> None:
         while self.cards_lay.count():
@@ -1172,6 +1241,29 @@ class ButtonWiringPage(QWidget):
             cmb_sfx.currentIndexChanged.connect(lambda _, c=cmb_sfx, r=rule: self._edit_rule(r, "sfx_index", int(c.currentData())))
             cl.addWidget(cmb_sfx, 1, 6, 1, 2)
 
+            # Row 3: Universal Conditional Gate & Variable Delta (Ammo / Ki / MP / Funds / Flags!)
+            cl.addWidget(QLabel("Cond:"), 2, 1)
+            cmb_cond = QComboBox()
+            for ck, cv in COND_NAMES.items():
+                cmb_cond.addItem(cv, ck)
+            cmb_cond.setCurrentIndex(max(0, cmb_cond.findData(rule.cond_type)))
+            cmb_cond.currentIndexChanged.connect(lambda _, c=cmb_cond, r=rule: self._edit_rule(r, "cond_type", int(c.currentData())))
+            cl.addWidget(cmb_cond, 2, 2, 1, 2)
+
+            cl.addWidget(QLabel("Idx:"), 2, 4)
+            sp_ci = QSpinBox()
+            sp_ci.setRange(0, 31)
+            sp_ci.setValue(rule.cond_idx)
+            sp_ci.valueChanged.connect(lambda v, r=rule: self._edit_rule(r, "cond_idx", v))
+            cl.addWidget(sp_ci, 2, 5)
+
+            cl.addWidget(QLabel("Var +/-:"), 2, 6)
+            sp_vd = QSpinBox()
+            sp_vd.setRange(-10, 10)
+            sp_vd.setValue(rule.var_delta)
+            sp_vd.valueChanged.connect(lambda v, r=rule: self._edit_rule(r, "var_delta", v))
+            cl.addWidget(sp_vd, 2, 7)
+
             self.cards_lay.addWidget(card)
 
         self.cards_lay.addStretch(1)
@@ -1198,15 +1290,17 @@ class ButtonWiringPage(QWidget):
     def _apply_scheme(self, kind: str) -> None:
         if not self.project:
             return
-        if kind == "metroidvania":
+        if kind in ("exploration", "metroidvania"):
             self.project.physics_mode = "platformer"
             rules = [
                 ButtonRule(button="LEFT", trigger=TRIGGER_HELD, action=ACTION_MOVE_LEFT, param=2, anim_name="walk", sfx_index=-1),
                 ButtonRule(button="RIGHT", trigger=TRIGGER_HELD, action=ACTION_MOVE_RIGHT, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="UP", trigger=TRIGGER_HELD, action=ACTION_MOVE_UP, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="DOWN", trigger=TRIGGER_HELD, action=ACTION_MOVE_DOWN, param=2, anim_name="walk", sfx_index=-1),
                 ButtonRule(button="L", trigger=TRIGGER_HELD, action=ACTION_AIM_UP, param=0, anim_name="", sfx_index=-1),
                 ButtonRule(button="A", trigger=TRIGGER_PRESSED, action=ACTION_JUMP, param=6, anim_name="jump", sfx_index=0),
                 ButtonRule(button="B", trigger=TRIGGER_PRESSED, action=ACTION_SHOOT, param=5, anim_name="attack", sfx_index=2),
-                ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_BOMB, param=4, anim_name="attack", sfx_index=4),
+                ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_BOMB, param=4, anim_name="attack", sfx_index=4, cond_type=COND_VAR_POS, cond_idx=0, var_delta=-1),
                 ButtonRule(button="SELECT", trigger=TRIGGER_PRESSED, action=ACTION_MORPH_BALL, param=0, anim_name="", sfx_index=3),
                 ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_PAUSE, param=0, anim_name="", sfx_index=-1),
             ]
@@ -1219,18 +1313,34 @@ class ButtonWiringPage(QWidget):
                 ButtonRule(button="DOWN", trigger=TRIGGER_HELD, action=ACTION_MOVE_DOWN, param=2, anim_name="walk", sfx_index=-1),
                 ButtonRule(button="A", trigger=TRIGGER_PRESSED, action=ACTION_MELEE, param=3, anim_name="attack", sfx_index=3),
                 ButtonRule(button="B", trigger=TRIGGER_PRESSED, action=ACTION_SHOOT, param=4, anim_name="attack", sfx_index=2),
+                ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_SUPER_BURST, param=5, anim_name="attack", sfx_index=4, cond_type=COND_VAR_POS, cond_idx=0, var_delta=-2),
+                ButtonRule(button="L", trigger=TRIGGER_PRESSED, action=ACTION_HEAL, param=1, anim_name="", sfx_index=1, cond_type=COND_VAR_POS, cond_idx=0, var_delta=-1),
                 ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_PAUSE, param=0, anim_name="", sfx_index=-1),
             ]
-        elif kind == "shooter":
-            self.project.physics_mode = "platformer"
+        elif kind == "shmup":
+            self.project.physics_mode = "shmup"
             rules = [
                 ButtonRule(button="LEFT", trigger=TRIGGER_HELD, action=ACTION_MOVE_LEFT, param=3, anim_name="walk", sfx_index=-1),
                 ButtonRule(button="RIGHT", trigger=TRIGGER_HELD, action=ACTION_MOVE_RIGHT, param=3, anim_name="walk", sfx_index=-1),
-                ButtonRule(button="A", trigger=TRIGGER_PRESSED, action=ACTION_JUMP, param=6, anim_name="jump", sfx_index=0),
-                ButtonRule(button="B", trigger=TRIGGER_HELD, action=ACTION_SHOOT, param=5, anim_name="attack", sfx_index=2),
-                ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_DASH, param=6, anim_name="jump", sfx_index=3),
-                ButtonRule(button="SELECT", trigger=TRIGGER_PRESSED, action=ACTION_PALETTE_NEXT, param=1, anim_name="", sfx_index=1),
-                ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_RESET_LEVEL, param=0, anim_name="idle", sfx_index=-1),
+                ButtonRule(button="UP", trigger=TRIGGER_HELD, action=ACTION_MOVE_UP, param=3, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="DOWN", trigger=TRIGGER_HELD, action=ACTION_MOVE_DOWN, param=3, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="B", trigger=TRIGGER_HELD, action=ACTION_SHOOT, param=6, anim_name="attack", sfx_index=2),
+                ButtonRule(button="A", trigger=TRIGGER_PRESSED, action=ACTION_DASH, param=6, anim_name="walk", sfx_index=3),
+                ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_SUPER_BURST, param=5, anim_name="attack", sfx_index=4, cond_type=COND_VAR_POS, cond_idx=0, var_delta=-1),
+                ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_PAUSE, param=0, anim_name="", sfx_index=-1),
+            ]
+        elif kind == "tactical":
+            self.project.physics_mode = "tactical"
+            rules = [
+                ButtonRule(button="LEFT", trigger=TRIGGER_HELD, action=ACTION_MOVE_LEFT, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="RIGHT", trigger=TRIGGER_HELD, action=ACTION_MOVE_RIGHT, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="UP", trigger=TRIGGER_HELD, action=ACTION_MOVE_UP, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="DOWN", trigger=TRIGGER_HELD, action=ACTION_MOVE_DOWN, param=2, anim_name="walk", sfx_index=-1),
+                ButtonRule(button="B", trigger=TRIGGER_PRESSED, action=ACTION_SHOOT, param=5, anim_name="attack", sfx_index=2),
+                ButtonRule(button="A", trigger=TRIGGER_PRESSED, action=ACTION_BOMB, param=4, anim_name="attack", sfx_index=4, cond_type=COND_VAR_POS, cond_idx=0, var_delta=-1),
+                ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_SUPER_BURST, param=5, anim_name="attack", sfx_index=4, cond_type=COND_VAR_POS, cond_idx=0, var_delta=-2),
+                ButtonRule(button="L", trigger=TRIGGER_PRESSED, action=ACTION_HEAL, param=1, anim_name="", sfx_index=1, cond_type=COND_VAR_POS, cond_idx=0, var_delta=-1),
+                ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_PAUSE, param=0, anim_name="", sfx_index=-1),
             ]
         else:
             self.project.physics_mode = "platformer"
@@ -1242,7 +1352,7 @@ class ButtonWiringPage(QWidget):
                 ButtonRule(button="R", trigger=TRIGGER_PRESSED, action=ACTION_DASH, param=5, anim_name="jump", sfx_index=3),
                 ButtonRule(button="L", trigger=TRIGGER_PRESSED, action=ACTION_MELEE, param=3, anim_name="attack", sfx_index=3),
                 ButtonRule(button="SELECT", trigger=TRIGGER_PRESSED, action=ACTION_PALETTE_NEXT, param=1, anim_name="", sfx_index=1),
-                ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_RESET_LEVEL, param=0, anim_name="idle", sfx_index=-1),
+                ButtonRule(button="START", trigger=TRIGGER_PRESSED, action=ACTION_PAUSE, param=0, anim_name="idle", sfx_index=-1),
             ]
         avail = set(self.project.profile()["buttons"])
         self.project.button_rules = [r for r in rules if r.button in avail]
@@ -1642,7 +1752,7 @@ class PlaytestBuildPage(QWidget):
         row2 = QHBoxLayout()
         b_gb = QPushButton("Export .gb / .gbc...")
         b_gb.clicked.connect(self.build_gb_dialog)
-        b_c = QPushButton("Export C Assets (.h)...")
+        b_c = QPushButton("Export C Starter (devkitARM)...")
         b_c.clicked.connect(self.export_c_dialog)
         row2.addWidget(b_gb)
         row2.addWidget(b_c)
@@ -1732,13 +1842,20 @@ class PlaytestBuildPage(QWidget):
         self._render_once()
 
     def _render_once(self) -> None:
-        if not self.sim:
+        if not self.sim or not self.project:
             return
         rgb = self.sim.render_rgb()
+        mrooms = [
+            (ri, self.project.rooms[ri].world_x, self.project.rooms[ri].world_y)
+            for ri in sorted(self.sim.visited_rooms)
+            if 0 <= ri < len(self.project.rooms)
+        ]
         self.screen.set_frame(
             rgb, self.sim.hp, self.sim.coins, self.sim.score, self.sim.paused, self.sim.won,
             room_idx=self.sim.room_idx, boss_hp=self.sim.boss_hp,
             banner=self.sim.banner_msg, dialogue=self.sim.dialog_text,
+            var0=self.sim.vars[0] if self.sim.vars else 0,
+            minimap_rooms=mrooms,
         )
 
     def _on_hw_flags_changed(self) -> None:

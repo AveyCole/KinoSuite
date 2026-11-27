@@ -409,6 +409,7 @@ class LevelMapCanvasWidget(QWidget):
         super().__init__(parent)
         self.project: Optional[KinoPixelProject] = None
         self.selected_tile: int = 1
+        self.selected_ai: int = 0   # AI archetype for Place Entity tool
         self.tool: str = "brush"  # brush | eraser | rect | eyedropper | spawn | enemy
         self.show_collision: bool = True
         self.show_viewport: bool = True
@@ -463,7 +464,14 @@ class LevelMapCanvasWidget(QWidget):
                     self.mapChanged.emit()
                     return
             if len(lvl.entities) < 16:
-                lvl.entities.append(EntityPlacement(kind="enemy", sprite_index=1, tile_x=tx, tile_y=ty, patrol_range=3, speed=1))
+                sp_idx = 1 if len(self.project.sprites) > 1 else 0
+                if self.selected_ai == 3:  # Boss
+                    boss_i = next((i for i, s in enumerate(self.project.sprites) if s.width >= 32), sp_idx)
+                    lvl.entities.append(EntityPlacement(kind="boss", ai_type=3, sprite_index=boss_i, tile_x=tx, tile_y=ty, patrol_range=5, speed=1, hp=12, phase2_hp=6))
+                elif self.selected_ai == 5:  # Friendly NPC
+                    lvl.entities.append(EntityPlacement(kind="npc", ai_type=5, sprite_index=sp_idx, tile_x=tx, tile_y=ty, patrol_range=0, speed=1, hp=9))
+                else:
+                    lvl.entities.append(EntityPlacement(kind="enemy", ai_type=self.selected_ai, sprite_index=sp_idx, tile_x=tx, tile_y=ty, patrol_range=3, speed=1, hp=2))
                 self._modified = True
                 self.mapChanged.emit()
             return
@@ -866,7 +874,8 @@ class PlaytestScreenWidget(QWidget):
         super().__init__(parent)
         self._frame_img: Optional[QImage] = None
         self.hud_info: Tuple[int, int, int, bool, bool] = (5, 0, 0, False, False)
-        self.extra_hud: Tuple[int, int, str, str] = (0, 0, "", "")  # room_idx, boss_hp, banner, dialogue
+        self.extra_hud: Tuple[int, int, str, str, int] = (0, 0, "", "", 0)  # room_idx, boss_hp, banner, dialogue, var0
+        self.minimap_data: Tuple[List[Tuple[int, int, int]], int] = ([], 0)  # [(idx, wx, wy), ...], active_idx
         self.lcd_grid: bool = True
         self.pressed_keys: Set[str] = set()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -875,12 +884,14 @@ class PlaytestScreenWidget(QWidget):
     def set_frame(
         self, rgb: np.ndarray, hp: int, coins: int, score: int, paused: bool, won: bool,
         room_idx: int = 0, boss_hp: int = 0, banner: str = "", dialogue: str = "",
+        var0: int = 0, minimap_rooms: Optional[List[Tuple[int, int, int]]] = None,
     ) -> None:
         h, w, _ = rgb.shape
         contiguous = np.ascontiguousarray(rgb)
         self._frame_img = QImage(contiguous.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
         self.hud_info = (hp, coins, score, paused, won)
-        self.extra_hud = (room_idx, boss_hp, banner, dialogue)
+        self.extra_hud = (room_idx, boss_hp, banner, dialogue, var0)
+        self.minimap_data = (minimap_rooms or [], room_idx)
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -936,12 +947,12 @@ class PlaytestScreenWidget(QWidget):
 
         # Crisp HUD overlay matching hardware BG1 HUD
         hp, coins, score, paused, won = self.hud_info
-        room_idx, boss_hp, banner, dialogue = self.extra_hud
+        room_idx, boss_hp, banner, dialogue, var0 = self.extra_hud
         p.setFont(QFont("Consolas", max(9, 4 * scale), QFont.Weight.Bold))
         p.setPen(QColor("#F43F5E"))
         p.drawText(ox + 8, oy + 4 * scale + 10, "♥" * max(0, hp))
         p.setPen(QColor("#FDE047"))
-        p.drawText(ox + 92, oy + 4 * scale + 10, f"★{coins:02d}  R{room_idx + 1}")
+        p.drawText(ox + 92, oy + 4 * scale + 10, f"★{coins:02d}  R{room_idx + 1}  M{var0:02d}")
         p.setPen(QColor("#F8FAFC"))
         p.drawText(ox + dw - 125, oy + 4 * scale + 10, f"PTS {score:04d}")
 
@@ -968,8 +979,19 @@ class PlaytestScreenWidget(QWidget):
             p.setPen(QColor("#34D399"))
             p.drawText(dst, Qt.AlignmentFlag.AlignCenter, "STAGE CLEAR!\nPress START / A to Replay")
         elif paused:
-            p.fillRect(QRect(ox + dw // 4, oy + dh // 2 - 22, dw // 2, 44), QColor(14, 17, 26, 210))
+            mbox = QRect(ox + dw // 5, oy + dh // 5, dw * 3 // 5, dh * 3 // 5)
+            p.fillRect(mbox, QColor(13, 19, 34, 235))
+            p.setPen(QPen(QColor("#A78BFA"), 2))
+            p.drawRect(mbox)
             p.setPen(QColor("#F59E0B"))
-            p.drawText(dst, Qt.AlignmentFlag.AlignCenter, "PAUSED")
+            p.drawText(QRect(mbox.x(), mbox.y() + 6, mbox.width(), 22), Qt.AlignmentFlag.AlignCenter, "PAUSED · WORLD MAP")
+            mrooms, cur_rm = self.minimap_data
+            cell_w = max(10, (mbox.width() - 24) // 16)
+            cell_h = max(10, (mbox.height() - 40) // 8)
+            for ri, wx, wy in mrooms:
+                rr = QRect(mbox.x() + 12 + (wx & 15) * cell_w, mbox.y() + 30 + (wy & 7) * cell_h, cell_w - 2, cell_h - 2)
+                p.fillRect(rr, QColor("#34D399") if ri == cur_rm else QColor("#FDE047"))
+                p.setPen(QColor("#0D1322"))
+                p.drawRect(rr)
 
         p.end()

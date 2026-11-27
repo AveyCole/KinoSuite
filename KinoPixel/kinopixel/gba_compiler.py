@@ -1,20 +1,25 @@
-"""KinoPixel v2.0 Native ARM7TDMI GBA Metroidvania ROM Compiler (+ .gb/.gbc & C Export).
+"""KinoPixel v3.0 Commercial-Grade General-Purpose ARM7TDMI GBA ROM Compiler (+ .gb/.gbc & C Export).
 
 Compiles any KinoPixelProject directly into a bootable, playable .gba ROM with:
-- Multi-room interconnected world & ability-gated Doors/Hatches
-- Real GBA Cartridge SRAM battery saves (0x0E000000 + 'SRAM_V113')
-- Multi-size hardware metasprites (16x16, 16x32 tall hero, 32x32 bosses)
+- Up to 128 interconnected rooms & ability-gated Doors/Hatches
+- 4 Native Physics / Genre Modes: Platformer (45° Slopes, Water Swim, Ladders, Wall-Jump),
+  Top-Down RPG (4-way), Space Shooter / Shmup (8-way flight), and Tactical Grid (16px tile-step)
+- Real GBA Cartridge SRAM battery saves (0x0E000000 + 'SRAM_V113', 'KPS3' format persisting
+  room, coordinates, HP, abilities, coins, 32-bit World Flags, Game Vars, and Minimap Visited bits)
+- Conditional Event / Variable Button Wiring (Ammo / Missiles / MP / World Flags / Abilities)
+- Multi-size hardware metasprites (16x16, 16x32 tall hero, 32x32 multi-phase bosses)
 - Morph Ball hitbox & sprite swap (fits through low tunnels!)
-- 8-way / diagonal Arm Cannon aiming, Wall-Jump, Bombs/Missiles & Destructible Blocks
-- Enemy AI: Patrol, Stalker/Chaser (SA-X), Plasma Turret, and 32x32 Multi-HP Bosses
+- 8-way / diagonal Arm Cannon aiming, Bombs/Missiles & Destructible Blocks
+- Universal AI Behavior VM: Patrol, Stalker/Chaser, Turret, 32x32 Multi-Phase Boss (Phase 2
+  3-way plasma spread + double speed!), Sine-Wave Hover/Swooper, and Friendly RPG NPCs
+- Pause-Screen Hardware Auto-Minimap on BG1 + Multi-Page Dialogue Box (Page 1 -> Page 2 -> Close)
 - Hardware Parallax BG2 (1/2 speed) + Hardware Alpha Blending (REG_BLDCNT / REG_BLDALPHA)
-- GBA PSG Channels 1 & 4 (SFX) + Channel 2 (Sequence Genie BGM) + Direct Sound DMA Channel A (8-bit PCM!)
-- BG1 Hardware HUD + Navigation Terminal Dialogue Box
+- 5-Voice GBA Audio: PSG Ch1 SFX, Ch2 Sequence Genie Lead, Ch3 4-bit Wave RAM Bass,
+  Ch4 Euclidean Drums/Noise SFX, and Direct Sound DMA Channel A (8-bit PCM!)
 """
 from __future__ import annotations
 
 import os
-import struct
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -34,6 +39,7 @@ from .models import (
     ACTION_AIM_UP,
     ACTION_BOMB,
     ACTION_DASH,
+    ACTION_HEAL,
     ACTION_INTERACT,
     ACTION_JUMP,
     ACTION_MELEE,
@@ -47,24 +53,36 @@ from .models import (
     ACTION_PLAY_SFX,
     ACTION_RESET_LEVEL,
     ACTION_SHOOT,
+    ACTION_SUPER_BURST,
     ACTION_SWITCH_ANIM,
     AI_BOSS,
     AI_CHASER,
+    AI_NPC,
+    AI_SINE,
     AI_TURRET,
     BUTTON_BITS,
+    COND_ABIL_OWNED,
+    COND_ALWAYS,
+    COND_FLAG_SET,
+    COND_VAR_POS,
     KinoPixelProject,
-    SpriteAsset,
+    PHYSICS_MODES,
     TILE_BOUNCE,
     TILE_BREAKABLE,
     TILE_COIN,
     TILE_DOOR,
     TILE_GOAL,
     TILE_HAZARD,
+    TILE_LADDER,
     TILE_ONEWAY,
     TILE_SAVE,
+    TILE_SLOPE_L,
+    TILE_SLOPE_R,
     TILE_SOLID,
+    TILE_SWITCH,
     TILE_TERMINAL,
     TILE_UPGRADE,
+    TILE_WATER,
     TRIGGER_HELD,
     TRIGGER_PRESSED,
     TRIGGER_RELEASED,
@@ -97,7 +115,7 @@ GB_NINTENDO_LOGO = bytes.fromhex(
 assert len(GB_NINTENDO_LOGO) == 48
 
 # ---------------------------------------------------------------------------
-# Crisp 8x8 Pixel Font for BG1 HUD & Navigation Terminal Dialogue Box
+# Crisp 8x8 Pixel Font for BG1 HUD, Multi-Page Dialogue & Pause Minimap
 # ---------------------------------------------------------------------------
 _FONT_BITMAPS: Dict[str, List[str]] = {
     " ": ["........", "........", "........", "........", "........", "........", "........", "........"],
@@ -182,9 +200,13 @@ def _pack_metasprite_4bpp(frame: List[List[int]], w: int, h: int) -> bytes:
 
 
 def _oam_shape_size_flags(w: int, h: int) -> Tuple[int, int]:
-    """Return (attr0_shape_bits, attr1_size_bits) for GBA OAM 16x16, 16x32, or 32x32."""
+    """Return (attr0_shape_bits, attr1_size_bits) for GBA OAM 16x16, 16x32, 32x16, 32x32, or 64x64."""
+    if w == 64 and h == 64:
+        return (0x0000, 0xC000)  # Square shape (0), size 3 -> 64x64 Giant Boss!
     if w == 16 and h == 32:
         return (0x8000, 0x8000)  # Tall shape (2), size 2 -> 16x32
+    if w == 32 and h == 16:
+        return (0x4000, 0x8000)  # Wide shape (1), size 2 -> 32x16 Vehicle / Tank!
     if w == 32 and h == 32:
         return (0x0000, 0x8000)  # Square shape (0), size 2 -> 32x32
     return (0x0000, 0x4000)      # Square shape (0), size 1 -> 16x16
@@ -212,7 +234,10 @@ def _build_hud_font_tiles() -> bytes:
 
 def _encode_dialogue_indices(text: str) -> bytes:
     """Encode up to 48 chars as FONT_INDEX bytes (2 lines x 24 chars inside BG1 dialogue box)."""
-    clean = "".join(c if c in FONT_INDEX else " " for c in text.upper())[:48].ljust(48, " ")
+    stripped = text.strip()
+    if not stripped:
+        return bytes(48)
+    clean = "".join(c if c in FONT_INDEX else " " for c in stripped.upper())[:48].ljust(48, " ")
     return bytes(FONT_INDEX[c] for c in clean)
 
 
@@ -276,28 +301,40 @@ ST_SHOOT_CD = 0x64    # projectile cooldown
 ST_MOVED = 0x68       # moved this frame flag
 ST_BGM_TICK = 0x6C    # Sequence Genie BGM divider
 ST_BGM_STEP = 0x70    # Sequence Genie step 0..15
-ST_ROOM_IDX = 0x74    # active room index 0..N-1
+ST_ROOM_IDX = 0x74    # active room index 0..127
 ST_ROOM_PTR = 0x78    # pointer to active ROM_ROOM descriptor
 ST_ABILITIES = 0x7C   # unlocked ability bitmask
 ST_MORPHED = 0x80     # 0=standing, 1=morph ball (16x16 hitbox!)
 ST_AIM_Y = 0x84       # -1=up, 0=horiz, +1=down
-ST_DIALOG_ON = 0x88   # 1 if Navigation Terminal dialogue box open
-ST_MSG_TIMER = 0x8C   # HUD flash banner timer (SAVED! / LOCKED / UPGRD!)
-ST_MSG_CODE = 0x90    # 1=SAVED!, 2=LOCKED, 3=UPGRD!
+ST_DIALOG_ON = 0x88   # 1 if Navigation/NPC dialogue box open
+ST_MSG_TIMER = 0x8C   # HUD flash banner timer (SAVED! / LOCKED / UPGRD! / SWITCH)
+ST_MSG_CODE = 0x90    # 1=SAVED!, 2=LOCKED, 3=UPGRD!, 4=SWITCH
 ST_DMA_TIMER = 0x94   # Direct Sound DMA Channel A active frames countdown
 ST_DOOR_CD = 0x98     # door warp cooldown frames
 ST_BOSS_DEAD = 0x9C   # boss defeated bitmask
 ST_BOSS_HP = 0xA0     # active boss HP in current room (for HUD bar)
-ST_TERM_CD = 0xA4     # terminal re-open cooldown
+ST_TERM_CD = 0xA4     # terminal/NPC re-open cooldown
+ST_WORLD_FLAGS = 0xA8 # 32-bit bitmask of switches / defeated bosses / quests
+ST_DIALOG_PAGE = 0xAC # 0 = Page 1, 1 = Page 2
+ST_IN_WATER = 0xB0    # 1 if overlapping TILE_WATER (low-G swim!)
+ST_ON_LADDER = 0xB4   # 1 if overlapping TILE_LADDER (climb!)
+ST_TACT_CD = 0xB8     # Tactical Grid discrete step cooldown
+ST_SHAKE = 0xBC       # Camera Screen Shake countdown (Treasure/Nintendo impact feel!)
 
-# Player & Enemy Projectiles: 6 slots (0..3 player, 4..5 enemy) * 20 bytes
+# Player & Enemy Projectiles: 8 slots (0..3 player, 4..7 enemy) * 20 bytes
 # Each slot: [active, x_px, y_px, vx_px, vy_and_flags (lo16 signed vy | bit16 heavy_bomb | bit17 is_enemy)]
-ST_PROJS = 0xC0       # 0xC0 .. 0x137 (120 bytes)
+ST_PROJS = 0xC0       # 0xC0 .. 0x15F (160 bytes)
 
-# Enemies: up to 16 slots * 40 bytes (0x140 .. 0x3BF)
-# [0:active, 4:x, 8:y, 12:min_x, 16:max_x, 20:dir, 24:speed, 28:tile_base, 32:ai_type, 36:hp_and_size]
-# hp_and_size: low 8 bits = hp, bit 8 = is_32x32, bits 16..23 = shoot_timer
-ST_ENEMIES = 0x140
+# Enemies & NPCs: up to 16 slots * 40 bytes (0x160 .. 0x3DF)
+# [0:active, 4:x, 8:y, 12:min_x, 16:max_x, 20:dir, 24:speed, 28:tile_base, 32:ai_type, 36:packed_meta]
+# packed_meta: bits 0..7 = hp, bit 8 = is_32x32, bits 16..23 = phase2_hp, bits 24..31 = defeat_flag
+ST_ENEMIES = 0x160
+
+# Universal Game Variables: VAR[0..7] (8 words = 32 bytes, 0x3E0 .. 0x3FF)
+ST_VARS = 0x3E0
+
+# Visited Rooms Bitmask: 4 words = 128 rooms (0x400 .. 0x40F)
+ST_VISITED = 0x400
 
 # Room Descriptor Offsets (64 bytes per room)
 RM_LVL_W = 0x00
@@ -313,9 +350,12 @@ RM_DLG_PTR = 0x24
 RM_UPG_ABIL = 0x28
 RM_PAR_EN = 0x2C
 RM_PAR_TILE = 0x30
+RM_DLG2_PTR = 0x34
+RM_WORLD_XY = 0x38
+RM_SWITCH_FLAG = 0x3C
 
 # Global Config Offsets (ROM_CONFIG)
-CFG_PHYSICS = 0x00
+CFG_PHYSICS = 0x00         # 0=platformer, 1=topdown, 2=shmup, 3=tactical
 CFG_GRAV = 0x04
 CFG_MAXFALL = 0x08
 CFG_NUM_PALS = 0x0C
@@ -333,7 +373,7 @@ CFG_SFX_WIN = 0x38
 CFG_SFX_JUMP = 0x3C
 CFG_BGM_EN = 0x40
 CFG_BGM_FSTEP = 0x44
-CFG_HERO_H = 0x48          # 16 or 32!
+CFG_HERO_H = 0x48          # 16 or 32
 CFG_HERO_A0_SH = 0x4C      # OAM attr0 shape bits (0x0000 or 0x8000)
 CFG_HERO_A1_SZ = 0x50      # OAM attr1 size bits (0x4000 or 0x8000)
 CFG_MORPH_TILE = 0x54      # 16x16 Morph Ball OBJ tile ID
@@ -346,7 +386,7 @@ CFG_DMA_FRAMES = 0x6C      # Sample duration in 60Hz frames
 
 
 def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
-    """Compile a KinoPixelProject v2.0 into a self-contained, bootable, playable .gba ROM."""
+    """Compile a KinoPixelProject v3.0 into a self-contained, bootable, playable .gba ROM."""
     warnings: List[str] = []
     asm = ArmAssembler(base_addr=0x08000000)
 
@@ -387,12 +427,12 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     bg_pal[0] = hex_to_bgr555(project.bg_color_hex)
     # HUD Palette Slot 15
     bg_pal[240 + 0] = 0
-    bg_pal[240 + 1] = hex_to_bgr555("#0D1322")  # Dialogue Box dark backdrop
+    bg_pal[240 + 1] = hex_to_bgr555("#0D1322")  # Dialogue/Minimap Box dark backdrop
     bg_pal[240 + 2] = hex_to_bgr555("#F8FAFC")  # Crisp white text
-    bg_pal[240 + 3] = hex_to_bgr555("#FDE047")  # Gold coin/upgrade
+    bg_pal[240 + 3] = hex_to_bgr555("#FDE047")  # Gold coin/visited room
     bg_pal[240 + 4] = hex_to_bgr555("#F43F5E")  # Crimson heart
     bg_pal[240 + 5] = hex_to_bgr555("#161A26")  # GB/GBC Bezel
-    bg_pal[240 + 6] = hex_to_bgr555("#34D399")  # Boss / Energy Bar mint
+    bg_pal[240 + 6] = hex_to_bgr555("#34D399")  # Boss / Current Minimap Room mint
 
     bg_tiles_bytes = bytearray()
     tile_types = bytearray(256)
@@ -407,11 +447,13 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     # Pack all multi-size OBJ metasprites (16x16 = 4 tiles, 16x32 = 8 tiles, 32x32 = 16 tiles)
     obj_tiles_bytes = bytearray()
     next_obj_tile = 0
-    sprite_bases: Dict[int, Tuple[int, int, int, int]] = {}  # idx -> (tile_base, fcount, w, h)
+    sprite_bases: Dict[int, Tuple[int, int, int, int]] = {}
 
     for si, sp in enumerate(project.sprites):
-        w = 32 if sp.width >= 32 else 16
-        h = 32 if sp.height >= 32 else 16
+        w = 64 if sp.width >= 64 else (32 if sp.width >= 32 else 16)
+        h = 64 if sp.height >= 64 else (32 if sp.height >= 32 else 16)
+        if w == 64 or h == 64:
+            w, h = 64, 64
         tpf = (w // 8) * (h // 8)
         base = next_obj_tile
         frames = sp.frames or [[[0] * w for _ in range(h)]]
@@ -429,7 +471,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     hero_tpf = (hero_w // 8) * (hero_h // 8)
     hero_a0_sh, hero_a1_sz = _oam_shape_size_flags(hero_w, hero_h)
 
-    # Identify Morph Ball, Projectile, Default Enemy, and Boss sprite tile bases
     morph_idx = project.morph_sprite_index
     if morph_idx < 0 or morph_idx not in sprite_bases:
         morph_idx = next((i for i, s in enumerate(project.sprites) if s.role == "morph"), 0)
@@ -456,8 +497,8 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
             fids.append(fids[-1])
         anim_table_words.extend([fcnt, ticks] + [hero_base + fi * hero_tpf for fi in fids])
 
-    # Rooms data preparation (up to 16 rooms!)
-    rooms = project.rooms[:16] if project.rooms else [project.level]
+    # Rooms data preparation (up to 128 rooms!)
+    rooms = project.rooms[:128] if project.rooms else [project.level]
     total_enemies_compiled = 0
     room_blobs = []
     for ri, rm in enumerate(rooms):
@@ -482,8 +523,10 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
             max_x = min((rw - (4 if is_32 else 2)) * 8, ex + pr)
             spd = max(1, min(4, ent.speed))
             hp = max(1, min(60, ent.hp))
-            hp_sz = (hp & 0xFF) | (is_32 << 8)
-            en_words.extend([1, ex, ey, min_x, max_x, 1, spd, sb[0], ent.ai_type & 3, hp_sz])
+            p2hp = max(0, min(60, ent.phase2_hp))
+            dflag = max(0, min(31, ent.defeat_flag))
+            packed_meta = (hp & 0xFF) | (is_32 << 8) | (p2hp << 16) | (dflag << 24)
+            en_words.extend([1, ex, ey, min_x, max_x, 1, spd, sb[0], ent.ai_type & 7, packed_meta])
         total_enemies_compiled += len(rm.entities[:16])
 
         # Doors: 6 words each [tile_x, tile_y, target_room, target_x_px, target_y_px, req_ability]
@@ -497,12 +540,17 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
             ])
 
         dlg_bytes = _encode_dialogue_indices(rm.dialogue_text)
-        room_blobs.append((ri, rw * 8, rh * 8, max(8, rm.spawn_x * 8), max(8, rm.spawn_y * 8),
-                           map_hw, en_words, len(rm.entities[:16]), door_words, len(rm.doors[:8]),
-                           dlg_bytes, rm.upgrade_ability & 0xFF, 1 if rm.parallax_enabled else 0,
-                           rm.parallax_tile_idx & 0xFF))
+        dlg2_bytes = _encode_dialogue_indices(rm.dialogue_page2)
+        wxy = (rm.world_x & 0xF) | ((rm.world_y & 0x7) << 8)
+        sflag = rm.switch_flag & 31
+        room_blobs.append((
+            ri, rw * 8, rh * 8, max(8, rm.spawn_x * 8), max(8, rm.spawn_y * 8),
+            map_hw, en_words, len(rm.entities[:16]), door_words, len(rm.doors[:8]),
+            dlg_bytes, dlg2_bytes, rm.upgrade_ability & 0xFF, 1 if rm.parallax_enabled else 0,
+            rm.parallax_tile_idx & 0xFF, wxy, sflag,
+        ))
 
-    # Button Rules
+    # Button Rules: 5 words (20 bytes) per rule!
     rules_words: List[int] = []
     for r in [x for x in project.button_rules if x.enabled][:32]:
         mask = BUTTON_BITS.get(r.button.upper(), 0)
@@ -511,10 +559,16 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         anim_id = anim_name_to_id.get(r.anim_name.lower(), 0xFF) if r.anim_name else 0xFF
         sfx_byte = (r.sfx_index & 0xFF) if (0 <= r.sfx_index < len(project.sfx_list)) else 0xFF
         packed = max(0, min(255, int(r.param))) | (anim_id << 8) | (sfx_byte << 16)
-        rules_words.extend([mask, int(r.trigger) & 3, int(r.action) & 0xFF, packed])
-    rules_count = len(rules_words) // 4
+        cond_word = (int(r.cond_type) & 0xFF) | ((int(r.cond_idx) & 0xFF) << 8) | ((int(r.var_delta) & 0xFF) << 16)
+        rules_words.extend([mask, int(r.trigger) & 3, int(r.action) & 0xFF, packed, cond_word])
+    rules_count = len(rules_words) // 5
 
-    # PSG SFX & Sequence Genie BGM & Direct Sound DMA PCM
+    # Starting Game Variables VAR[0..7]
+    start_vars = [int(v) & 0xFFFFFFFF for v in (project.starting_vars or [10, 0, 0, 0, 0, 0, 0, 0])[:8]]
+    while len(start_vars) < 8:
+        start_vars.append(0)
+
+    # PSG SFX, 3-Voice Sequence Genie BGM (Ch2 Lead + Ch3 Wave RAM Bass + Ch4 Drums) & Direct Sound DMA PCM
     sfx_words: List[int] = []
     for patch in project.sfx_list[:16]:
         ch, cl, ch_reg, cx = patch.to_gba_regs()
@@ -529,8 +583,8 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
 
     bgm_fstep, bgm_steps = compile_genie_to_gba_bgm(project.sequence_genie)
     bgm_words: List[int] = []
-    for c2l, c2h, dflag in bgm_steps:
-        bgm_words.extend([c2l, c2h, dflag])
+    for c2l, c2h, c3x, dflag in bgm_steps:
+        bgm_words.extend([c2l, c2h, c3x, dflag])
 
     dma_pcm_bytes = generate_direct_sound_pcm(project.direct_sound)
     dma_sr = max(4096, min(16384, int(project.direct_sound.sample_rate)))
@@ -541,8 +595,10 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     view_w, view_h = (160, 144) if is_gb_frame else (240, 160)
     view_ox, view_oy = (40, 8) if is_gb_frame else (0, 0)
 
+    phys_id = PHYSICS_MODES.get(project.physics_mode, 0)
+
     config_words = [
-        1 if project.physics_mode == "topdown" else 0,     # CFG_PHYSICS
+        phys_id,                                           # CFG_PHYSICS (0..3)
         max(8, min(128, int(project.gravity))),            # CFG_GRAV
         max(256, min(1536, int(project.max_fall_speed))),  # CFG_MAXFALL
         num_pals,                                          # CFG_NUM_PALS
@@ -573,33 +629,47 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     ]
 
     # ------------------------------------------------------------------
-    # 3. Emit ARM7TDMI Game Engine Kernel
+    # 3. Emit ARM7TDMI v3.0 Game Engine Kernel
     # ------------------------------------------------------------------
     asm.label("entry_start")
     asm.ldr_lit(SP, 0x03007F00)
     asm.ldr_lit(R11, 0x03000000)
     asm.ldr_lit(R10, "ROM_CONFIG")
 
-    # Zero-clear IWRAM state struct (0x03000000..0x03000400)
+    # Zero-clear IWRAM state struct (0x03000000..0x03000500 = 320 words)
     asm.mov_reg(R0, R11)
     asm.mov_imm(R1, 0)
-    asm.mov_imm(R2, 256)
+    asm.mov_imm(R2, 320)
     asm.label("zero_iwram_loop")
     asm.str(R1, R0, 0)
     asm.add_imm(R0, R0, 4)
     asm.sub_imm(R2, R2, 1, s=True)
     asm.b("zero_iwram_loop", "NE")
 
-    # Init Hardware PSG + Direct Sound A (REG_SOUNDCNT_X/L/H)
+    # Init Hardware PSG (Ch1..Ch4) + Direct Sound A (REG_SOUNDCNT_X/L/H)
     asm.ldr_lit(R0, 0x04000084)     # REG_SOUNDCNT_X
     asm.mov_imm(R1, 0x80)
     asm.strh(R1, R0, 0)
-    asm.ldr_lit(R0, 0x04000080)     # REG_SOUNDCNT_L
+    asm.ldr_lit(R0, 0x04000080)     # REG_SOUNDCNT_L (Ch1..4 full volume L/R)
     asm.ldr_lit(R1, 0xFF77)
     asm.strh(R1, R0, 0)
     asm.ldr_lit(R0, 0x04000082)     # REG_SOUNDCNT_H: PSG 100% + Direct Sound A L/R + Timer 0 + FIFO Reset
     asm.ldr_lit(R1, 0x0B06)
     asm.strh(R1, R0, 0)
+
+    # Init GBA PSG Channel 3 4-bit Wave RAM Bass (0x04000070..74 & 0x04000090..9E)
+    asm.ldr_lit(R0, 0x04000070)     # REG_SOUND3CNT_L: select bank 1 for playback -> write bank 0
+    asm.mov_imm(R1, 0x0040)
+    asm.strh(R1, R0, 0)
+    asm.ldr_lit(R0, "ROM_WAVE_RAM")
+    asm.ldr_lit(R1, 0x04000090)
+    asm.mov_imm(R2, 8)              # 8 halfwords = 16 bytes (32 x 4-bit triangle/saw wave samples)
+    asm.bl("copy_halfwords")
+    asm.ldr_lit(R0, 0x04000070)
+    asm.mov_imm(R1, 0x0080)         # Enable Ch3 playback from bank 0!
+    asm.strh(R1, R0, 0)
+    asm.ldr_lit(R1, 0x2000)         # REG_SOUND3CNT_H: 100% volume
+    asm.strh(R1, R0, 2)
 
     # Copy BG Palette, OBJ Palette, BG Tiles, HUD Font, OBJ Metasprites
     asm.ldr_lit(R0, "ROM_PAL_BG")
@@ -636,7 +706,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.bl("load_from_sram", "NE")
 
     # Configure Display: Mode 0 | 1D OBJ (0x40) | BG0 (0x100) | BG1 (0x200) | BG2 (0x400) | OBJ (0x1000) = 0x1740
-    # BG0CNT = 0x5C01 (64x32 SBB 28, prio 1), BG1CNT = 0x1E04 (32x32 CBB 1 SBB 30, prio 0), BG2CNT = 0x1A02 (32x32 SBB 26, prio 2)
     asm.ldr_lit(R0, 0x04000008)
     asm.ldr_lit(R1, 0x5C01)
     asm.strh(R1, R0, 0)
@@ -645,14 +714,14 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr_lit(R1, 0x1A02)
     asm.strh(R1, R0, 4)
 
-    # Optional Hardware Alpha Blending for BG2 atmospheric parallax (REG_BLDCNT 0x04000050, REG_BLDALPHA 0x04000052)
+    # Optional Hardware Alpha Blending for BG2 atmospheric parallax
     asm.ldr(R0, R10, CFG_ALPHA_EN)
     asm.cmp_imm(R0, 0)
     asm.b("skip_alpha_init", "EQ")
     asm.ldr_lit(R0, 0x04000050)
-    asm.ldr_lit(R1, 0x2044)  # BG2 alpha blend over Backdrop
+    asm.ldr_lit(R1, 0x2044)
     asm.strh(R1, R0, 0)
-    asm.ldr_lit(R1, 0x0A08)  # EVA=8, EVB=10
+    asm.ldr_lit(R1, 0x0A08)
     asm.strh(R1, R0, 2)
     asm.label("skip_alpha_init")
 
@@ -685,7 +754,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.sub_imm(R0, R0, 1, s=True)
     asm.str(R0, R11, ST_DMA_TIMER)
     asm.b("dma_not_active", "GT")
-    # Stop DMA1 & Timer 0 cleanly when sample finishes
     asm.mov_imm(R1, 0)
     asm.ldr_lit(R2, 0x040000C6)
     asm.strh(R1, R2, 0)
@@ -707,15 +775,30 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.bic_reg(R3, R2, R1)
     asm.str(R3, R11, ST_REL_K)
 
-    # If Dialogue Box is open -> dismiss on A or B press!
+    # Multi-Page Dialogue Box: Page 0 -> Page 1 (if non-empty) -> Close!
     asm.ldr(R0, R11, ST_DIALOG_ON)
     asm.cmp_imm(R0, 0)
     asm.b("not_dialog", "EQ")
     asm.ldr(R1, R11, ST_PRESS_K)
     asm.tst_imm(R1, 0x03)  # A or B
     asm.b("after_gameplay", "EQ")
+    asm.ldr(R0, R11, ST_DIALOG_PAGE)
+    asm.cmp_imm(R0, 0)
+    asm.b("dlg_close_now", "NE")
+    # Check if Page 2 is non-empty (first byte != 0)
+    asm.ldr(R2, R11, ST_ROOM_PTR)
+    asm.ldr(R2, R2, RM_DLG2_PTR)
+    asm.ldrb(R3, R2, 0)
+    asm.cmp_imm(R3, 0)
+    asm.b("dlg_close_now", "EQ")
+    asm.mov_imm(R0, 1)
+    asm.str(R0, R11, ST_DIALOG_PAGE)
+    asm.bl("draw_dialogue_box")
+    asm.b("after_gameplay")
+    asm.label("dlg_close_now")
     asm.mov_imm(R0, 0)
     asm.str(R0, R11, ST_DIALOG_ON)
+    asm.str(R0, R11, ST_DIALOG_PAGE)
     asm.mov_imm(R0, 35)
     asm.str(R0, R11, ST_TERM_CD)
     asm.bl("clear_dialogue_box")
@@ -734,7 +817,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.label("not_won")
 
     # Decrement timers
-    for st_off in (ST_INVULN, ST_ALOCK, ST_DASH, ST_MELEE, ST_SHOOT_CD, ST_MSG_TIMER, ST_DOOR_CD, ST_TERM_CD):
+    for st_off in (ST_INVULN, ST_ALOCK, ST_DASH, ST_MELEE, ST_SHOOT_CD, ST_MSG_TIMER, ST_DOOR_CD, ST_TERM_CD, ST_TACT_CD, ST_SHAKE):
         asm.ldr(R0, R11, st_off)
         asm.cmp_imm(R0, 0)
         asm.sub_imm(R0, R0, 1, cond="GT")
@@ -753,9 +836,13 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.cmp_imm(R1, 0)
     asm.b("skip_vx_clear", "GT")
     asm.str(R0, R11, ST_VX)
+    # Clear ST_VY if non-platformer (topdown/shmup/tactical) OR on ladder!
     asm.ldr(R2, R10, CFG_PHYSICS)
-    asm.cmp_imm(R2, 1)
-    asm.str(R0, R11, ST_VY, cond="EQ")
+    asm.cmp_imm(R2, 0)
+    asm.str(R0, R11, ST_VY, cond="NE")
+    asm.ldr(R2, R11, ST_ON_LADDER)
+    asm.cmp_imm(R2, 0)
+    asm.str(R0, R11, ST_VY, cond="NE")
     asm.label("skip_vx_clear")
 
     asm.bl("process_button_rules")
@@ -779,7 +866,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pool()
 
     # ==================================================================
-    # Helper: hero_height -> R0 (16 if morphed else CFG_HERO_H)
+    # Helpers: get_hero_h -> R0, bit_mask(R0=bit 0..31) -> R0=(1<<bit)
     # ==================================================================
     asm.label("get_hero_h")
     asm.ldr(R0, R11, ST_MORPHED)
@@ -788,8 +875,19 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr(R0, R10, CFG_HERO_H, cond="EQ")
     asm.bx(LR)
 
+    asm.label("bit_mask")
+    asm.and_imm(R1, R0, 31)
+    asm.mov_imm(R0, 1)
+    asm.cmp_imm(R1, 0)
+    asm.bx(LR, "EQ")
+    asm.label("bm_loop")
+    asm.mov_reg(R0, R0, "LSL", 1)
+    asm.sub_imm(R1, R1, 1, s=True)
+    asm.b("bm_loop", "NE")
+    asm.bx(LR)
+
     # ==================================================================
-    # Subroutine: process_button_rules (all 17 actions incl. Morph, AimUp, Bomb, WallJump!)
+    # Subroutine: process_button_rules (17 actions + Conditional Vars/Flags + Tactical Step!)
     # ==================================================================
     asm.label("process_button_rules")
     asm.push([R4, R5, R6, R7, R8, R9, LR])
@@ -823,6 +921,41 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("pbr_next", "NE")
     asm.label("pbr_not_paused")
 
+    # v3.0 Conditional Gate Check (word 4: cond_type | cond_idx<<8 | var_delta<<16)
+    asm.ldr(R12, R5, 16)
+    asm.and_imm(R0, R12, 0xFF)        # cond_type
+    asm.cmp_imm(R0, COND_ALWAYS)
+    asm.b("pbr_cond_ok", "EQ")
+    asm.mov_reg(R1, R12, "LSR", 8)
+    asm.and_imm(R1, R1, 0xFF)         # cond_idx
+
+    asm.cmp_imm(R0, COND_VAR_POS)
+    asm.b("pbr_chk_cflag", "NE")
+    asm.and_imm(R1, R1, 7)
+    asm.add_imm(R2, R11, ST_VARS)
+    asm.ldr_reg(R0, R2, R1, shift_amt=2)
+    asm.cmp_imm(R0, 0)
+    asm.b("pbr_next", "LE")           # VAR[idx] <= 0 -> blocked!
+    asm.b("pbr_cond_ok")
+
+    asm.label("pbr_chk_cflag")
+    asm.cmp_imm(R0, COND_FLAG_SET)
+    asm.b("pbr_chk_cabil", "NE")
+    asm.mov_reg(R0, R1)
+    asm.bl("bit_mask")
+    asm.ldr(R2, R11, ST_WORLD_FLAGS)
+    asm.tst_reg(R2, R0)
+    asm.b("pbr_next", "EQ")
+    asm.b("pbr_cond_ok")
+
+    asm.label("pbr_chk_cabil")
+    asm.cmp_imm(R0, COND_ABIL_OWNED)
+    asm.b("pbr_cond_ok", "NE")
+    asm.ldr(R2, R11, ST_ABILITIES)
+    asm.tst_reg(R2, R1)
+    asm.b("pbr_next", "EQ")
+
+    asm.label("pbr_cond_ok")
     asm.and_imm(R1, R9, 0xFF)
     asm.mov_reg(R2, R9, "LSR", 8)
     asm.and_imm(R2, R2, 0xFF)
@@ -832,8 +965,20 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     # ACTION_MOVE_LEFT (1)
     asm.cmp_imm(R8, ACTION_MOVE_LEFT)
     asm.b("act_not_left", "NE")
+    asm.ldr(R6, R10, CFG_PHYSICS)
+    asm.cmp_imm(R6, 3)                # Tactical Grid mode?
+    asm.b("act_left_norm", "NE")
+    asm.ldr(R0, R11, ST_TACT_CD)
+    asm.cmp_imm(R0, 0)
+    asm.b("pbr_next", "GT")
+    asm.mov_imm(R0, 10)
+    asm.str(R0, R11, ST_TACT_CD)
+    asm.ldr_lit(R0, (-4096) & 0xFFFFFFFF)  # -16px tile step
+    asm.b("act_left_st")
+    asm.label("act_left_norm")
     asm.mov_reg(R0, R1, "LSL", 7)
     asm.rsb_imm(R0, R0, 0)
+    asm.label("act_left_st")
     asm.str(R0, R11, ST_VX)
     asm.mov_imm(R0, 1)
     asm.str(R0, R11, ST_FACING)
@@ -844,7 +989,19 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     # ACTION_MOVE_RIGHT (2)
     asm.cmp_imm(R8, ACTION_MOVE_RIGHT)
     asm.b("act_not_right", "NE")
+    asm.ldr(R6, R10, CFG_PHYSICS)
+    asm.cmp_imm(R6, 3)
+    asm.b("act_right_norm", "NE")
+    asm.ldr(R0, R11, ST_TACT_CD)
+    asm.cmp_imm(R0, 0)
+    asm.b("pbr_next", "GT")
+    asm.mov_imm(R0, 10)
+    asm.str(R0, R11, ST_TACT_CD)
+    asm.mov_imm(R0, 4096)             # +16px tile step
+    asm.b("act_right_st")
+    asm.label("act_right_norm")
     asm.mov_reg(R0, R1, "LSL", 7)
+    asm.label("act_right_st")
     asm.str(R0, R11, ST_VX)
     asm.mov_imm(R0, 0)
     asm.str(R0, R11, ST_FACING)
@@ -853,12 +1010,29 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("pbr_post_fx")
     asm.label("act_not_right")
 
-    # ACTION_MOVE_UP (3)
+    # ACTION_MOVE_UP (3) — TopDown, Shmup, Tactical, Ladder climb, or Platformer Aim Up!
     asm.cmp_imm(R8, ACTION_MOVE_UP)
     asm.b("act_not_up", "NE")
     asm.ldr(R6, R10, CFG_PHYSICS)
-    asm.cmp_imm(R6, 1)
-    asm.b("act_up_aim", "NE")
+    asm.cmp_imm(R6, 3)
+    asm.b("act_up_not_tact", "NE")
+    asm.ldr(R0, R11, ST_TACT_CD)
+    asm.cmp_imm(R0, 0)
+    asm.b("pbr_next", "GT")
+    asm.mov_imm(R0, 10)
+    asm.str(R0, R11, ST_TACT_CD)
+    asm.ldr_lit(R0, (-4096) & 0xFFFFFFFF)
+    asm.str(R0, R11, ST_VY)
+    asm.mov_imm(R0, 1)
+    asm.str(R0, R11, ST_MOVED)
+    asm.b("pbr_post_fx")
+    asm.label("act_up_not_tact")
+    asm.cmp_imm(R6, 0)
+    asm.b("act_up_move", "NE")
+    asm.ldr(R6, R11, ST_ON_LADDER)
+    asm.cmp_imm(R6, 0)
+    asm.b("act_up_aim", "EQ")
+    asm.label("act_up_move")
     asm.mov_reg(R0, R1, "LSL", 7)
     asm.rsb_imm(R0, R0, 0)
     asm.str(R0, R11, ST_VY)
@@ -866,32 +1040,55 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R11, ST_MOVED)
     asm.b("pbr_post_fx")
     asm.label("act_up_aim")
-    asm.mvn_imm(R0, 0)  # -1 aim up
+    asm.mvn_imm(R0, 0)
     asm.str(R0, R11, ST_AIM_Y)
     asm.b("pbr_post_fx")
     asm.label("act_not_up")
 
-    # ACTION_MOVE_DOWN (4)
+    # ACTION_MOVE_DOWN (4) — TopDown, Shmup, Tactical, Ladder descend, or Aim Down!
     asm.cmp_imm(R8, ACTION_MOVE_DOWN)
     asm.b("act_not_down", "NE")
     asm.ldr(R6, R10, CFG_PHYSICS)
-    asm.cmp_imm(R6, 1)
-    asm.b("act_down_aim", "NE")
+    asm.cmp_imm(R6, 3)
+    asm.b("act_down_not_tact", "NE")
+    asm.ldr(R0, R11, ST_TACT_CD)
+    asm.cmp_imm(R0, 0)
+    asm.b("pbr_next", "GT")
+    asm.mov_imm(R0, 10)
+    asm.str(R0, R11, ST_TACT_CD)
+    asm.mov_imm(R0, 4096)
+    asm.str(R0, R11, ST_VY)
+    asm.mov_imm(R0, 1)
+    asm.str(R0, R11, ST_MOVED)
+    asm.b("pbr_post_fx")
+    asm.label("act_down_not_tact")
+    asm.cmp_imm(R6, 0)
+    asm.b("act_down_move", "NE")
+    asm.ldr(R6, R11, ST_ON_LADDER)
+    asm.cmp_imm(R6, 0)
+    asm.b("act_down_aim", "EQ")
+    asm.label("act_down_move")
     asm.mov_reg(R0, R1, "LSL", 7)
     asm.str(R0, R11, ST_VY)
     asm.mov_imm(R0, 1)
     asm.str(R0, R11, ST_MOVED)
     asm.b("pbr_post_fx")
     asm.label("act_down_aim")
-    asm.mov_imm(R0, 1)  # +1 aim down in air
+    asm.mov_imm(R0, 1)
     asm.str(R0, R11, ST_AIM_Y)
     asm.b("pbr_post_fx")
     asm.label("act_not_down")
 
-    # ACTION_JUMP (5) — supports High Jump Boots AND Wall-Jump!
+    # ACTION_JUMP (5) — Ground, Water Swim, Ladder Jump-Off, High Jump Boots & Wall-Jump!
     asm.cmp_imm(R8, ACTION_JUMP)
     asm.b("act_not_jump", "NE")
     asm.ldr(R0, R11, ST_GROUND)
+    asm.cmp_imm(R0, 0)
+    asm.b("act_do_jump", "NE")
+    asm.ldr(R0, R11, ST_IN_WATER)
+    asm.cmp_imm(R0, 0)
+    asm.b("act_do_jump", "NE")
+    asm.ldr(R0, R11, ST_ON_LADDER)
     asm.cmp_imm(R0, 0)
     asm.b("act_do_jump", "NE")
     # Airborne: check Wall-Jump if ABIL_WALL_JUMP unlocked!
@@ -901,7 +1098,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.push([R1, R2, R3])
     asm.ldr(R0, R11, ST_PX)
     asm.mov_reg(R0, R0, "ASR", 8)
-    asm.sub_imm(R0, R0, 2)            # test left wall
+    asm.sub_imm(R0, R0, 2)
     asm.ldr(R1, R11, ST_PY)
     asm.mov_reg(R1, R1, "ASR", 8)
     asm.add_imm(R1, R1, 8)
@@ -910,7 +1107,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("act_wj_right", "EQ")
     asm.ldr(R0, R11, ST_PX)
     asm.mov_reg(R0, R0, "ASR", 8)
-    asm.add_imm(R0, R0, 17)           # test right wall
+    asm.add_imm(R0, R0, 17)
     asm.ldr(R1, R11, ST_PY)
     asm.mov_reg(R1, R1, "ASR", 8)
     asm.add_imm(R1, R1, 8)
@@ -942,10 +1139,12 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.label("act_do_jump")
     asm.mov_reg(R0, R1, "LSL", 7)
     asm.add_imm(R0, R0, 192)
-    # High Jump Boots bonus (+192)
     asm.ldr(R6, R11, ST_ABILITIES)
     asm.tst_imm(R6, ABIL_HIGH_JUMP)
     asm.add_imm(R0, R0, 192, cond="NE")
+    asm.ldr(R6, R11, ST_IN_WATER)
+    asm.cmp_imm(R6, 0)
+    asm.mov_reg(R0, R0, "ASR", 1, cond="NE")  # Gentle swim impulse in water!
     asm.rsb_imm(R0, R0, 0)
     asm.str(R0, R11, ST_VY)
     asm.mov_imm(R0, 0)
@@ -967,7 +1166,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("pbr_post_fx")
     asm.label("act_not_dash")
 
-    # ACTION_SHOOT (7) — 8-Way / Diagonal Aim Arm Cannon!
+    # ACTION_SHOOT (7)
     asm.cmp_imm(R8, ACTION_SHOOT)
     asm.b("act_not_shoot", "NE")
     asm.ldr(R0, R11, ST_SHOOT_CD)
@@ -977,7 +1176,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R11, ST_SHOOT_CD)
     asm.push([R1, R2, R3])
     asm.mov_reg(R0, R1)
-    asm.mov_imm(R1, 0)                # normal shot (0)
+    asm.mov_imm(R1, 0)
     asm.bl("spawn_projectile")
     asm.pop([R1, R2, R3])
     asm.b("pbr_post_fx")
@@ -1012,16 +1211,25 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("pbr_post_fx")
     asm.label("act_not_reset")
 
-    # ACTION_PAUSE (13)
+    # ACTION_PAUSE (13) — Toggles Pause + Hardware BG1 Sector Minimap!
     asm.cmp_imm(R8, ACTION_PAUSE)
     asm.b("act_not_pause", "NE")
     asm.ldr(R0, R11, ST_PAUSED)
     asm.eor_imm(R0, R0, 1)
     asm.str(R0, R11, ST_PAUSED)
+    asm.push([R1, R2, R3])
+    asm.cmp_imm(R0, 0)
+    asm.b("act_pause_clr", "EQ")
+    asm.bl("draw_minimap")
+    asm.b("act_pause_done")
+    asm.label("act_pause_clr")
+    asm.bl("clear_minimap")
+    asm.label("act_pause_done")
+    asm.pop([R1, R2, R3])
     asm.b("pbr_post_fx")
     asm.label("act_not_pause")
 
-    # ACTION_MORPH_BALL (14) — Toggles 16x32 Standing <-> 16x16 Morph Ball!
+    # ACTION_MORPH_BALL (14)
     asm.cmp_imm(R8, ACTION_MORPH_BALL)
     asm.b("act_not_morph", "NE")
     asm.ldr(R0, R11, ST_ABILITIES)
@@ -1030,7 +1238,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr(R0, R11, ST_MORPHED)
     asm.cmp_imm(R0, 0)
     asm.b("act_unmorph", "NE")
-    # Enter Morph Ball: shift py down by (CFG_HERO_H - 16) << 8 so feet stay planted!
     asm.mov_imm(R0, 1)
     asm.str(R0, R11, ST_MORPHED)
     asm.ldr(R6, R10, CFG_HERO_H)
@@ -1040,7 +1247,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R11, ST_PY)
     asm.b("pbr_post_fx")
     asm.label("act_unmorph")
-    # Check ceiling clearance before unmorphing (if hero is 32px tall)
     asm.ldr(R6, R10, CFG_HERO_H)
     asm.cmp_imm(R6, 16)
     asm.b("act_unmorph_ok", "LE")
@@ -1054,7 +1260,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.bl("tile_type_at_px")
     asm.cmp_imm(R0, TILE_SOLID)
     asm.pop([R1, R2, R3])
-    asm.b("pbr_next", "EQ")  # Ceiling blocked! Stay morphed!
+    asm.b("pbr_next", "EQ")
     asm.ldr(R6, R10, CFG_HERO_H)
     asm.sub_imm(R6, R6, 16)
     asm.ldr(R0, R11, ST_PY)
@@ -1066,7 +1272,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("pbr_post_fx")
     asm.label("act_not_morph")
 
-    # ACTION_AIM_UP (15) — Hold L to lock diagonal/upward aim!
+    # ACTION_AIM_UP (15)
     asm.cmp_imm(R8, ACTION_AIM_UP)
     asm.b("act_not_aimup", "NE")
     asm.mvn_imm(R0, 0)
@@ -1074,7 +1280,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("pbr_post_fx")
     asm.label("act_not_aimup")
 
-    # ACTION_BOMB (16) — Heavy Missile / Morph Bomb (3x damage + shatters TILE_BREAKABLE + DMA!)
+    # ACTION_BOMB (16)
     asm.cmp_imm(R8, ACTION_BOMB)
     asm.b("act_not_bomb", "NE")
     asm.ldr(R0, R11, ST_SHOOT_CD)
@@ -1084,7 +1290,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R11, ST_SHOOT_CD)
     asm.push([R1, R2, R3])
     asm.mov_reg(R0, R1)
-    asm.mov_imm(R1, 1)  # heavy missile/bomb flag!
+    asm.mov_imm(R1, 1)
     asm.bl("spawn_projectile")
     asm.pop([R1, R2, R3])
     asm.b("pbr_post_fx")
@@ -1098,7 +1304,73 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("pbr_post_fx")
     asm.label("act_not_inter")
 
+    # ACTION_SUPER_BURST (18) — 3-Way Heavy Spread + Screen Shake + Direct Sound DMA!
+    asm.cmp_imm(R8, ACTION_SUPER_BURST)
+    asm.b("act_not_sburst", "NE")
+    asm.ldr(R0, R11, ST_SHOOT_CD)
+    asm.cmp_imm(R0, 0)
+    asm.b("pbr_next", "GT")
+    asm.mov_imm(R0, 18)
+    asm.str(R0, R11, ST_SHOOT_CD)
+    asm.mov_imm(R0, 12)
+    asm.str(R0, R11, ST_SHAKE)
+    asm.ldr(R6, R11, ST_CURR_K)
+    asm.push([R1, R2, R3, R6])
+    # Center heavy shot
+    asm.mov_imm(R0, 0)
+    asm.str(R0, R11, ST_AIM_Y)
+    asm.mov_reg(R0, R1)
+    asm.mov_imm(R1, 1)
+    asm.bl("spawn_projectile")
+    # Diagonal UP heavy shot
+    asm.mvn_imm(R0, 0)
+    asm.str(R0, R11, ST_AIM_Y)
+    asm.ldr(R0, R11, ST_CURR_K)
+    asm.orr_imm(R0, R0, BUTTON_BITS["RIGHT"])
+    asm.str(R0, R11, ST_CURR_K)
+    asm.ldr(R0, SP, 0)
+    asm.mov_imm(R1, 1)
+    asm.bl("spawn_projectile")
+    # Diagonal DOWN heavy shot
+    asm.mov_imm(R0, 1)
+    asm.str(R0, R11, ST_AIM_Y)
+    asm.ldr(R0, SP, 0)
+    asm.mov_imm(R1, 1)
+    asm.bl("spawn_projectile")
+    asm.bl("play_dma_pcm")
+    asm.pop([R1, R2, R3, R6])
+    asm.str(R6, R11, ST_CURR_K)
+    asm.b("pbr_post_fx")
+    asm.label("act_not_sburst")
+
+    # ACTION_HEAL (19) — Restore +1 HP (clamped at 5)
+    asm.cmp_imm(R8, ACTION_HEAL)
+    asm.b("act_not_heal", "NE")
+    asm.ldr(R0, R11, ST_HP)
+    asm.cmp_imm(R0, 5)
+    asm.b("pbr_next", "GE")
+    asm.add_imm(R0, R0, 1)
+    asm.str(R0, R11, ST_HP)
+    asm.b("pbr_post_fx")
+    asm.label("act_not_heal")
+
     asm.label("pbr_post_fx")
+    # Apply signed var_delta to ST_VARS[cond_idx & 7] if non-zero!
+    asm.ldr(R12, R5, 16)
+    asm.mov_reg(R0, R12, "LSL", 8)
+    asm.mov_reg(R0, R0, "ASR", 24)    # signed 8-bit var_delta
+    asm.cmp_imm(R0, 0)
+    asm.b("pbr_no_vdelta", "EQ")
+    asm.mov_reg(R1, R12, "LSR", 8)
+    asm.and_imm(R1, R1, 7)
+    asm.add_imm(R6, R11, ST_VARS)
+    asm.ldr_reg(R12, R6, R1, shift_amt=2)
+    asm.add_reg(R12, R12, R0)
+    asm.cmp_imm(R12, 0)
+    asm.mov_imm(R12, 0, cond="LT")
+    asm.str_reg(R12, R6, R1, shift_amt=2)
+    asm.label("pbr_no_vdelta")
+
     asm.cmp_imm(R2, 4)
     asm.b("pbr_no_anim", "GE")
     asm.cmp_imm(R7, TRIGGER_PRESSED)
@@ -1114,7 +1386,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.bl("play_sfx")
 
     asm.label("pbr_next")
-    asm.add_imm(R5, R5, 16)
+    asm.add_imm(R5, R5, 20)           # 20 bytes (5 words) per rule!
     asm.sub_imm(R4, R4, 1, s=True)
     asm.b("pbr_loop", "NE")
 
@@ -1123,7 +1395,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pool()
 
     # ==================================================================
-    # Subroutine: update_player_physics (Supports 16x16 & 16x32 dynamic hitbox!)
+    # Subroutine: update_player_physics (45° Slopes, Water Swim, Ladders & 4 Genre Modes!)
     # ==================================================================
     asm.label("update_player_physics")
     asm.push([R4, R5, R6, R7, R8, R9, LR])
@@ -1131,20 +1403,45 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.mov_reg(R9, R0)               # R9 = active hero height (16 or 32)
     asm.ldr(R12, R11, ST_ROOM_PTR)
 
-    # Gravity
+    # Probe Water & Ladder overlap at hero center
+    asm.ldr(R0, R11, ST_PX)
+    asm.mov_reg(R0, R0, "ASR", 8)
+    asm.add_imm(R0, R0, 8)
+    asm.ldr(R1, R11, ST_PY)
+    asm.mov_reg(R1, R1, "ASR", 8)
+    asm.add_reg(R1, R1, R9, "ASR", 1)
+    asm.bl("tile_type_at_px")
+    asm.cmp_imm(R0, TILE_WATER)
+    asm.mov_imm(R2, 1, cond="EQ")
+    asm.mov_imm(R2, 0, cond="NE")
+    asm.str(R2, R11, ST_IN_WATER)
+    asm.cmp_imm(R0, TILE_LADDER)
+    asm.mov_imm(R2, 1, cond="EQ")
+    asm.mov_imm(R2, 0, cond="NE")
+    asm.str(R2, R11, ST_ON_LADDER)
+
+    # Gravity (only in Platformer mode=0 and NOT on ladder; halved in water!)
     asm.ldr(R0, R10, CFG_PHYSICS)
+    asm.cmp_imm(R0, 0)
+    asm.b("phys_no_grav", "NE")
+    asm.ldr(R0, R11, ST_ON_LADDER)
     asm.cmp_imm(R0, 0)
     asm.b("phys_no_grav", "NE")
     asm.ldr(R1, R11, ST_VY)
     asm.ldr(R2, R10, CFG_GRAV)
-    asm.add_reg(R1, R1, R2)
     asm.ldr(R3, R10, CFG_MAXFALL)
+    asm.ldr(R0, R11, ST_IN_WATER)
+    asm.cmp_imm(R0, 0)
+    asm.mov_reg(R2, R2, "ASR", 1, cond="NE")
+    asm.mov_reg(R3, R3, "ASR", 1, cond="NE")
+    asm.add_reg(R1, R1, R2)
     asm.cmp_reg(R1, R3)
     asm.mov_reg(R1, R3, cond="GT")
     asm.str(R1, R11, ST_VY)
     asm.label("phys_no_grav")
 
     # Horizontal Move
+    asm.ldr(R12, R11, ST_ROOM_PTR)
     asm.ldr(R4, R11, ST_PX)
     asm.ldr(R5, R11, ST_VX)
     asm.add_reg(R6, R4, R5)
@@ -1163,7 +1460,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("phys_x_ok", "EQ")
     asm.b("phys_x_left", "LT")
 
-    # Right probe at y+2, y+(h/2), y+(h-3)
     asm.add_imm(R0, R7, 13)
     asm.add_imm(R1, R8, 2)
     asm.bl("is_solid_px")
@@ -1224,6 +1520,15 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.add_imm(R0, R0, 2)
     asm.cmp_reg(R8, R0)
     asm.b("phys_not_pit", "LT")
+    # Pit hazard only kills in platformer mode; clamp in Shmup/TopDown/Tactical!
+    asm.ldr(R2, R10, CFG_PHYSICS)
+    asm.cmp_imm(R2, 0)
+    asm.b("phys_pit_dmg", "EQ")
+    asm.sub_imm(R0, R0, 2)
+    asm.mov_reg(R6, R0, "LSL", 8)
+    asm.mov_reg(R8, R0)
+    asm.b("phys_not_pit")
+    asm.label("phys_pit_dmg")
     asm.bl("damage_respawn")
     asm.b("phys_done")
     asm.label("phys_not_pit")
@@ -1233,7 +1538,47 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.cmp_imm(R5, 0)
     asm.b("phys_y_up", "LT")
 
-    # Moving down: feet at new_y + R9 (16 or 32)
+    # 45-Degree Slope Check at Hero Feet Center (px + 8, new_y + hh - 1)
+    asm.add_imm(R0, R7, 8)
+    asm.add_reg(R1, R8, R9)
+    asm.sub_imm(R1, R1, 1)
+    asm.bl("tile_type_at_px")
+    asm.cmp_imm(R0, TILE_SLOPE_L)
+    asm.b("phys_slope_l", "EQ")
+    asm.cmp_imm(R0, TILE_SLOPE_R)
+    asm.b("phys_slope_r", "EQ")
+    asm.b("phys_chk_flat")
+
+    asm.label("phys_slope_l")
+    # '/' slope: floor_y = ((new_y + hh - 1) & ~7) + (7 - ((px + 8) & 7))
+    asm.add_imm(R2, R7, 8)
+    asm.and_imm(R2, R2, 7)
+    asm.rsb_imm(R2, R2, 7)
+    asm.b("phys_slope_snap")
+
+    asm.label("phys_slope_r")
+    # '\' slope: floor_y = ((new_y + hh - 1) & ~7) + ((px + 8) & 7)
+    asm.add_imm(R2, R7, 8)
+    asm.and_imm(R2, R2, 7)
+
+    asm.label("phys_slope_snap")
+    asm.add_reg(R0, R8, R9)
+    asm.sub_imm(R0, R0, 1)
+    asm.bic_imm(R0, R0, 7)
+    asm.add_reg(R0, R0, R2)           # floor_y
+    asm.add_reg(R1, R8, R9)           # feet_y
+    asm.cmp_reg(R1, R0)
+    asm.b("phys_chk_flat", "LT")
+    asm.sub_reg(R0, R0, R9)
+    asm.mov_reg(R6, R0, "LSL", 8)
+    asm.mov_imm(R0, 0)
+    asm.str(R0, R11, ST_VY)
+    asm.mov_imm(R0, 1)
+    asm.str(R0, R11, ST_GROUND)
+    asm.b("phys_y_ok")
+
+    # Flat Ground / One-Way Check at feet (new_y + R9)
+    asm.label("phys_chk_flat")
     for ox, lbl_nxt in ((3, "phys_chk_r"), (12, "phys_y_ok")):
         asm.add_imm(R0, R7, ox)
         asm.add_reg(R1, R8, R9)
@@ -1299,7 +1644,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pop([PC])
 
     # ==================================================================
-    # Subroutine: check_tile_triggers (COIN, HAZARD, BOUNCE, GOAL, DOOR, SAVE, UPGRADE, TERMINAL!)
+    # Subroutine: check_tile_triggers (COIN, HAZARD, BOUNCE, GOAL, DOOR, SAVE, UPGRADE, TERMINAL, SWITCH!)
     # ==================================================================
     asm.label("check_tile_triggers")
     asm.push([R4, R5, R6, R7, R8, LR])
@@ -1308,7 +1653,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr(R5, R11, ST_PY)
     asm.mov_reg(R5, R5, "ASR", 8)
     asm.bl("get_hero_h")
-    asm.mov_reg(R8, R0)               # hero height (16 or 32)
+    asm.mov_reg(R8, R0)
 
     for tag, is_bottom in (("pt1", False), ("pt2", True)):
         asm.add_imm(R6, R4, 8)
@@ -1369,7 +1714,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         asm.b("trig_exit")
         asm.label(f"t_ng_{tag}")
 
-        # UPGRADE ORB -> Unlocks room's Ability Flag + Direct Sound DMA fanfare!
+        # UPGRADE ORB
         asm.cmp_imm(R0, TILE_UPGRADE)
         asm.b(f"t_nu_{tag}", "NE")
         asm.mov_reg(R0, R6, "ASR", 3)
@@ -1381,6 +1726,10 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         asm.ldr(R0, R11, ST_ABILITIES)
         asm.orr_reg(R0, R0, R1)
         asm.str(R0, R11, ST_ABILITIES)
+        # Also refill +5 Ammo/MP in VAR[0] on upgrade!
+        asm.ldr(R0, R11, ST_VARS)
+        asm.add_imm(R0, R0, 5)
+        asm.str(R0, R11, ST_VARS)
         asm.mov_imm(R0, 3)  # UPGRD!
         asm.str(R0, R11, ST_MSG_CODE)
         asm.mov_imm(R0, 75)
@@ -1391,7 +1740,27 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         asm.b(f"t_end_{tag}")
         asm.label(f"t_nu_{tag}")
 
-        # SAVE STATION -> Writes Real GBA Cartridge SRAM (0x0E000000) + full HP!
+        # WORLD SWITCH -> Sets room's World Flag bit!
+        asm.cmp_imm(R0, TILE_SWITCH)
+        asm.b(f"t_nsw_{tag}", "NE")
+        asm.ldr(R1, R11, ST_ROOM_PTR)
+        asm.ldr(R0, R1, RM_SWITCH_FLAG)
+        asm.bl("bit_mask")
+        asm.ldr(R2, R11, ST_WORLD_FLAGS)
+        asm.tst_reg(R2, R0)
+        asm.b(f"t_end_{tag}", "NE")   # Already triggered!
+        asm.orr_reg(R2, R2, R0)
+        asm.str(R2, R11, ST_WORLD_FLAGS)
+        asm.mov_imm(R0, 4)            # SWITCH
+        asm.str(R0, R11, ST_MSG_CODE)
+        asm.mov_imm(R0, 70)
+        asm.str(R0, R11, ST_MSG_TIMER)
+        asm.ldr(R0, R10, CFG_SFX_COIN)
+        asm.bl("play_sfx")
+        asm.b(f"t_end_{tag}")
+        asm.label(f"t_nsw_{tag}")
+
+        # SAVE STATION -> Real GBA Cartridge SRAM + Full HP!
         asm.cmp_imm(R0, TILE_SAVE)
         asm.b(f"t_ns_{tag}", "NE")
         asm.ldr(R0, R11, ST_MSG_TIMER)
@@ -1409,7 +1778,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         asm.b(f"t_end_{tag}")
         asm.label(f"t_ns_{tag}")
 
-        # NAVIGATION TERMINAL -> Opens BG1 Dialogue Box!
+        # NAVIGATION TERMINAL -> Opens Multi-Page BG1 Dialogue Box!
         asm.cmp_imm(R0, TILE_TERMINAL)
         asm.b(f"t_nt_{tag}", "NE")
         asm.ldr(R0, R11, ST_TERM_CD)
@@ -1417,6 +1786,8 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         asm.b(f"t_end_{tag}", "GT")
         asm.mov_imm(R0, 1)
         asm.str(R0, R11, ST_DIALOG_ON)
+        asm.mov_imm(R0, 0)
+        asm.str(R0, R11, ST_DIALOG_PAGE)
         asm.bl("draw_dialogue_box")
         asm.ldr(R0, R10, CFG_SFX_COIN)
         asm.bl("play_sfx")
@@ -1452,27 +1823,25 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr(R6, R4, RM_DOOR_PTR)
 
     asm.label("trd_loop")
-    asm.ldr(R2, R6, 0)                # door tile_x
+    asm.ldr(R2, R6, 0)
     asm.sub_reg(R2, R2, R0)
     asm.cmp_imm(R2, 0)
     asm.rsb_imm(R2, R2, 0, cond="LT")
     asm.cmp_imm(R2, 2)
     asm.b("trd_next", "GT")
-    asm.ldr(R3, R6, 4)                # door tile_y
+    asm.ldr(R3, R6, 4)
     asm.sub_reg(R3, R3, R1)
     asm.cmp_imm(R3, 0)
     asm.rsb_imm(R3, R3, 0, cond="LT")
     asm.cmp_imm(R3, 3)
     asm.b("trd_next", "GT")
 
-    # Matched door! Check ability requirement (offset 20)
     asm.ldr(R7, R6, 20)
     asm.cmp_imm(R7, 0)
     asm.b("trd_warp", "EQ")
     asm.ldr(R2, R11, ST_ABILITIES)
     asm.tst_reg(R2, R7)
     asm.b("trd_warp", "NE")
-    # Locked hatch!
     asm.mov_imm(R0, 2)  # LOCKED
     asm.str(R0, R11, ST_MSG_CODE)
     asm.mov_imm(R0, 45)
@@ -1484,9 +1853,9 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("trd_done")
 
     asm.label("trd_warp")
-    asm.ldr(R0, R6, 8)                # target_room
-    asm.ldr(R1, R6, 12)               # target_x_px
-    asm.ldr(R2, R6, 16)               # target_y_px
+    asm.ldr(R0, R6, 8)
+    asm.ldr(R1, R6, 12)
+    asm.ldr(R2, R6, 16)
     asm.mov_imm(R3, 35)
     asm.str(R3, R11, ST_DOOR_CD)
     asm.bl("load_room")
@@ -1501,24 +1870,25 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pop([R4, R5, R6, R7, PC])
 
     # ==================================================================
-    # Subroutine: save_to_sram / load_from_sram (8-bit STRB/LDRB at 0x0E000000)
+    # Subroutine: save_to_sram / load_from_sram ('KPS3' 24-byte Battery Save!)
+    # Persists: room, tx, ty, hp, abilities, coins, boss_dead, world_flags (4B),
+    #           VAR[0..3] (4B), visited[0] (4B) + XOR checksum!
     # ==================================================================
     asm.label("save_to_sram")
     asm.ldr(R0, R10, CFG_SRAM_EN)
     asm.cmp_imm(R0, 0)
     asm.bx(LR, "EQ")
     asm.ldr_lit(R3, 0x0E000000)
-    # Magic 'K','P','S','2'
-    for idx, ch in enumerate(b"KPS2"):
+    for idx, ch in enumerate(b"KPS3"):
         asm.mov_imm(R0, ch)
         asm.strb(R0, R3, idx)
     asm.ldr(R0, R11, ST_ROOM_IDX)
     asm.strb(R0, R3, 4)
     asm.ldr(R0, R11, ST_PX)
-    asm.mov_reg(R0, R0, "ASR", 11)    # tile_x
+    asm.mov_reg(R0, R0, "ASR", 11)
     asm.strb(R0, R3, 5)
     asm.ldr(R0, R11, ST_PY)
-    asm.mov_reg(R0, R0, "ASR", 11)    # tile_y
+    asm.mov_reg(R0, R0, "ASR", 11)
     asm.strb(R0, R3, 6)
     asm.ldr(R0, R11, ST_HP)
     asm.strb(R0, R3, 7)
@@ -1528,23 +1898,39 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.strb(R0, R3, 9)
     asm.ldr(R0, R11, ST_BOSS_DEAD)
     asm.strb(R0, R3, 10)
-    # Compute XOR checksum of bytes 0..10 ^ 0xA5
+    # 4 bytes of ST_WORLD_FLAGS (offsets 11..14)
+    asm.ldr(R0, R11, ST_WORLD_FLAGS)
+    for b_i in range(4):
+        asm.strb(R0, R3, 11 + b_i)
+        if b_i < 3:
+            asm.mov_reg(R0, R0, "LSR", 8)
+    # 4 bytes of VAR[0..3] (offsets 15..18)
+    for v_i in range(4):
+        asm.ldr(R0, R11, ST_VARS + v_i * 4)
+        asm.strb(R0, R3, 15 + v_i)
+    # 4 bytes of ST_VISITED[0] (offsets 19..22)
+    asm.ldr(R0, R11, ST_VISITED)
+    for b_i in range(4):
+        asm.strb(R0, R3, 19 + b_i)
+        if b_i < 3:
+            asm.mov_reg(R0, R0, "LSR", 8)
+    # XOR checksum of bytes 0..22 ^ 0xA5 -> byte 23
     asm.mov_imm(R1, 0xA5)
     asm.mov_imm(R2, 0)
     asm.label("sram_chk_w")
     asm.ldrb_reg(R0, R3, R2)
     asm.eor_reg(R1, R1, R0)
     asm.add_imm(R2, R2, 1)
-    asm.cmp_imm(R2, 11)
+    asm.cmp_imm(R2, 23)
     asm.b("sram_chk_w", "LT")
-    asm.strb(R1, R3, 11)
+    asm.strb(R1, R3, 23)
     asm.bx(LR)
     asm.pool()
 
     asm.label("load_from_sram")
     asm.push([R4, R5, LR])
     asm.ldr_lit(R3, 0x0E000000)
-    for idx, ch in enumerate(b"KPS2"):
+    for idx, ch in enumerate(b"KPS3"):
         asm.ldrb(R0, R3, idx)
         asm.cmp_imm(R0, ch)
         asm.b("sram_load_fail", "NE")
@@ -1554,13 +1940,13 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldrb_reg(R0, R3, R2)
     asm.eor_reg(R1, R1, R0)
     asm.add_imm(R2, R2, 1)
-    asm.cmp_imm(R2, 11)
+    asm.cmp_imm(R2, 23)
     asm.b("sram_chk_r", "LT")
-    asm.ldrb(R0, R3, 11)
+    asm.ldrb(R0, R3, 23)
     asm.cmp_reg(R0, R1)
     asm.b("sram_load_fail", "NE")
 
-    # Valid SRAM! Restore abilities, hp, coins, boss_dead, and load saved room!
+    # Restore full state!
     asm.ldrb(R0, R3, 7)
     asm.cmp_imm(R0, 1)
     asm.mov_imm(R0, 5, cond="LT")
@@ -1571,11 +1957,28 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R11, ST_COINS)
     asm.ldrb(R0, R3, 10)
     asm.str(R0, R11, ST_BOSS_DEAD)
-    asm.ldrb(R0, R3, 4)               # room_idx
+    # Restore 32-bit ST_WORLD_FLAGS
+    asm.ldrb(R0, R3, 11)
+    for b_i in range(1, 4):
+        asm.ldrb(R1, R3, 11 + b_i)
+        asm.orr_reg(R0, R0, R1, "LSL", b_i * 8)
+    asm.str(R0, R11, ST_WORLD_FLAGS)
+    # Restore VAR[0..3]
+    for v_i in range(4):
+        asm.ldrb(R0, R3, 15 + v_i)
+        asm.str(R0, R11, ST_VARS + v_i * 4)
+    # Restore ST_VISITED[0]
+    asm.ldrb(R0, R3, 19)
+    for b_i in range(1, 4):
+        asm.ldrb(R1, R3, 19 + b_i)
+        asm.orr_reg(R0, R0, R1, "LSL", b_i * 8)
+    asm.str(R0, R11, ST_VISITED)
+    # Load saved room & position
+    asm.ldrb(R0, R3, 4)
     asm.ldrb(R1, R3, 5)
-    asm.mov_reg(R1, R1, "LSL", 3)     # px
+    asm.mov_reg(R1, R1, "LSL", 3)
     asm.ldrb(R2, R3, 6)
-    asm.mov_reg(R2, R2, "LSL", 3)     # py
+    asm.mov_reg(R2, R2, "LSL", 3)
     asm.bl("load_room")
     asm.label("sram_load_fail")
     asm.pop([R4, R5, PC])
@@ -1588,17 +1991,14 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr(R0, R10, CFG_DMA_EN)
     asm.cmp_imm(R0, 0)
     asm.bx(LR, "EQ")
-    # Stop DMA1 & Timer 0
     asm.mov_imm(R0, 0)
     asm.ldr_lit(R1, 0x040000C6)
     asm.strh(R0, R1, 0)
     asm.ldr_lit(R1, 0x04000102)
     asm.strh(R0, R1, 0)
-    # Reset FIFO A
     asm.ldr_lit(R1, 0x04000082)
     asm.ldr_lit(R0, 0x0B06)
     asm.strh(R0, R1, 0)
-    # Configure DMA1: SAD = ROM_DMA_PCM, DAD = 0x040000A0 (FIFO_A), CNT_H = 0xB640
     asm.ldr_lit(R1, 0x040000BC)
     asm.ldr_lit(R0, "ROM_DMA_PCM")
     asm.str(R0, R1, 0)
@@ -1606,13 +2006,11 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R1, 4)
     asm.ldr_lit(R0, 0xB640)
     asm.strh(R0, R1, 10)
-    # Start Timer 0 at exact sample rate
     asm.ldr_lit(R1, 0x04000100)
     asm.ldr(R0, R10, CFG_DMA_TM0)
     asm.strh(R0, R1, 0)
     asm.mov_imm(R0, 0x0080)
     asm.strh(R0, R1, 2)
-    # Set frame countdown so sample stops cleanly
     asm.ldr(R0, R10, CFG_DMA_FRAMES)
     asm.str(R0, R11, ST_DMA_TIMER)
     asm.bx(LR)
@@ -1652,7 +2050,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
 
     # ==================================================================
     # Subroutine: spawn_projectile (R0 = speed, R1 = is_heavy_bomb 0/1)
-    # Supports 8-Way / Diagonal Aiming via ST_AIM_Y & ST_CURR_K!
     # ==================================================================
     asm.label("spawn_projectile")
     asm.push([R4, R5, R6, LR])
@@ -1678,27 +2075,30 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.cmp_imm(R3, 0)
     asm.add_imm(R2, R2, 8, cond="EQ")
     asm.sub_imm(R2, R2, 8, cond="NE")
-    asm.str(R2, R4, 4)                # x_px
+    asm.str(R2, R4, 4)
     asm.ldr(R2, R11, ST_PY)
     asm.mov_reg(R2, R2, "ASR", 8)
     asm.add_imm(R2, R2, 4)
-    asm.str(R2, R4, 8)                # y_px
+    asm.str(R2, R4, 8)
 
-    # Compute vx and vy from ST_AIM_Y (-1=up, 0=horiz, +1=down) & LEFT/RIGHT held!
+    # In Shmup mode (CFG_PHYSICS == 2), always fire straight right/facing horizontally!
+    asm.ldr(R6, R10, CFG_PHYSICS)
+    asm.cmp_imm(R6, 2)
+    asm.b("sp_horiz", "EQ")
+
     asm.ldr(R6, R11, ST_AIM_Y)
     asm.cmp_imm(R6, 0)
     asm.b("sp_horiz", "EQ")
-    # Aiming Up or Down: check if LEFT or RIGHT held -> diagonal 45 deg, else straight vertical!
     asm.ldr(R2, R11, ST_CURR_K)
     asm.tst_imm(R2, BUTTON_BITS["LEFT"] | BUTTON_BITS["RIGHT"])
-    asm.mov_imm(R2, 0, cond="EQ")     # pure vertical vx=0
-    asm.mov_reg(R2, R0, cond="NE")    # diagonal vx=+/-speed
+    asm.mov_imm(R2, 0, cond="EQ")
+    asm.mov_reg(R2, R0, cond="NE")
     asm.cmp_imm(R3, 0)
     asm.rsb_imm(R2, R2, 0, cond="NE")
-    asm.str(R2, R4, 12)               # vx
+    asm.str(R2, R4, 12)
     asm.cmp_imm(R6, 0)
-    asm.rsb_imm(R2, R0, 0, cond="LT") # vy = -speed if aiming up
-    asm.mov_reg(R2, R0, cond="GT")    # vy = +speed if aiming down
+    asm.rsb_imm(R2, R0, 0, cond="LT")
+    asm.mov_reg(R2, R0, cond="GT")
     asm.b("sp_store_vy")
 
     asm.label("sp_horiz")
@@ -1712,38 +2112,36 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr_lit(R3, 0xFFFF)
     asm.and_reg(R2, R2, R3)
     asm.cmp_imm(R1, 0)
-    asm.orr_imm(R2, R2, 0x10000, cond="NE")  # bit 16 = heavy bomb/missile
+    asm.orr_imm(R2, R2, 0x10000, cond="NE")
     asm.str(R2, R4, 16)
     asm.label("sp_done")
     asm.pop([R4, R5, R6, PC])
     asm.pool()
 
     # ==================================================================
-    # Subroutine: update_projectiles (Player + Enemy shots + Destructible Blocks!)
+    # Subroutine: update_projectiles (8 slots: 0..3 player, 4..7 enemy!)
     # ==================================================================
     asm.label("update_projectiles")
     asm.push([R4, R5, R6, R7, R8, LR])
     asm.add_imm(R4, R11, ST_PROJS)
-    asm.mov_imm(R5, 6)                # 4 player + 2 enemy slots
+    asm.mov_imm(R5, 8)
     asm.ldr(R8, R11, ST_ROOM_PTR)
 
     asm.label("up_loop")
     asm.ldr(R0, R4, 0)
     asm.cmp_imm(R0, 0)
     asm.b("up_next", "EQ")
-    asm.ldr(R6, R4, 4)                # x
-    asm.ldr(R7, R4, 8)                # y
-    asm.ldr(R0, R4, 12)               # vx
+    asm.ldr(R6, R4, 4)
+    asm.ldr(R7, R4, 8)
+    asm.ldr(R0, R4, 12)
     asm.add_reg(R6, R6, R0)
     asm.str(R6, R4, 4)
-    # Sign-extend lo16 vy from offset 16
     asm.ldr(R0, R4, 16)
     asm.mov_reg(R1, R0, "LSL", 16)
     asm.mov_reg(R1, R1, "ASR", 16)
     asm.add_reg(R7, R7, R1)
     asm.str(R7, R4, 8)
 
-    # Bounds check
     asm.cmp_imm(R6, 0)
     asm.b("up_kill", "LT")
     asm.ldr(R2, R8, RM_LVL_W)
@@ -1755,7 +2153,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.cmp_reg(R7, R2)
     asm.b("up_kill", "GE")
 
-    # If enemy projectile (bit 17 set) -> check hit against player!
     asm.ldr(R0, R4, 16)
     asm.tst_imm(R0, 0x20000)
     asm.b("up_chk_tile", "EQ")
@@ -1784,7 +2181,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.bl("tile_type_at_px")
     asm.cmp_imm(R0, TILE_BREAKABLE)
     asm.b("up_not_brk", "NE")
-    # Shatter destructible block live in EWRAM & VRAM!
     asm.add_imm(R0, R6, 8)
     asm.mov_reg(R0, R0, "ASR", 3)
     asm.add_imm(R1, R7, 8)
@@ -1808,7 +2204,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pop([R4, R5, R6, R7, R8, PC])
 
     # ==================================================================
-    # Subroutine: update_enemies (Patrol, Chaser/SA-X, Turret, 32x32 Multi-HP Boss!)
+    # Subroutine: update_enemies (Patrol, Chaser, Turret, Multi-Phase Boss, Sine Hover, Friendly NPC!)
     # ==================================================================
     asm.label("update_enemies")
     asm.push([R4, R5, R6, R7, R8, R9, LR])
@@ -1829,7 +2225,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.cmp_imm(R0, 0)
     asm.b("ue_next", "EQ")
 
-    # Record boss HP for HUD if ai_type == AI_BOSS (3)
     asm.ldr(R1, R4, 32)               # ai_type
     asm.cmp_imm(R1, AI_BOSS)
     asm.b("ue_not_boss_hud", "NE")
@@ -1838,17 +2233,45 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R11, ST_BOSS_HP)
     asm.label("ue_not_boss_hud")
 
+    # Friendly NPC (AI_NPC = 5): stationary, never damaged, touching opens dialogue!
+    asm.cmp_imm(R1, AI_NPC)
+    asm.b("ue_hostile", "NE")
+    asm.ldr(R6, R4, 4)
+    asm.ldr(R7, R4, 8)
+    asm.sub_reg(R0, R8, R6)
+    asm.cmp_imm(R0, 0)
+    asm.rsb_imm(R0, R0, 0, cond="LT")
+    asm.cmp_imm(R0, 14)
+    asm.b("ue_next", "GT")
+    asm.sub_reg(R1, R9, R7)
+    asm.cmp_imm(R1, 0)
+    asm.rsb_imm(R1, R1, 0, cond="LT")
+    asm.cmp_imm(R1, 16)
+    asm.b("ue_next", "GT")
+    asm.ldr(R0, R11, ST_TERM_CD)
+    asm.cmp_imm(R0, 0)
+    asm.b("ue_next", "GT")
+    asm.mov_imm(R0, 1)
+    asm.str(R0, R11, ST_DIALOG_ON)
+    asm.mov_imm(R0, 0)
+    asm.str(R0, R11, ST_DIALOG_PAGE)
+    asm.bl("draw_dialogue_box")
+    asm.ldr(R0, R10, CFG_SFX_COIN)
+    asm.bl("play_sfx")
+    asm.b("ue_next")
+
+    asm.label("ue_hostile")
     # Move every 2 frames
     asm.ldr(R0, R11, ST_FRAME)
     asm.tst_imm(R0, 1)
     asm.b("ue_after_ai", "NE")
 
-    asm.ldr(R6, R4, 4)                # x
-    asm.ldr(R7, R4, 8)                # y
-    asm.ldr(R1, R4, 32)               # ai_type
-    asm.ldr(R2, R4, 24)               # speed
+    asm.ldr(R6, R4, 4)
+    asm.ldr(R7, R4, 8)
+    asm.ldr(R1, R4, 32)
+    asm.ldr(R2, R4, 24)               # base speed
 
-    # AI_CHASER (1): pursues player X & Y!
+    # AI_CHASER (1)
     asm.cmp_imm(R1, AI_CHASER)
     asm.b("ue_not_chaser", "NE")
     asm.cmp_reg(R6, R8)
@@ -1861,9 +2284,9 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.b("ue_after_ai")
     asm.label("ue_not_chaser")
 
-    # AI_TURRET (2): stationary, fires plasma toward hero every 64 frames!
+    # AI_TURRET (2)
     asm.cmp_imm(R1, AI_TURRET)
-    asm.b("ue_patrol_or_boss", "NE")
+    asm.b("ue_not_turret", "NE")
     asm.ldr(R0, R11, ST_FRAME)
     asm.and_imm(R0, R0, 63)
     asm.cmp_imm(R0, 0)
@@ -1873,16 +2296,38 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.cmp_reg(R8, R6)
     asm.mov_imm(R2, 2, cond="GE")
     asm.ldr_lit(R2, (-2) & 0xFFFFFFFF, cond="LT")
+    asm.mov_imm(R3, 0)
     asm.bl("spawn_enemy_shot")
     asm.b("ue_after_ai")
+    asm.label("ue_not_turret")
 
-    # AI_PATROL (0) or AI_BOSS (3): patrol X between min_x..max_x (+ boss fires plasma!)
+    # AI_SINE (4): oscillate Y up/down + patrol X!
+    asm.cmp_imm(R1, AI_SINE)
+    asm.b("ue_patrol_or_boss", "NE")
+    asm.ldr(R0, R11, ST_FRAME)
+    asm.tst_imm(R0, 32)
+    asm.add_imm(R7, R7, 1, cond="EQ")
+    asm.sub_imm(R7, R7, 1, cond="NE")
+    asm.str(R7, R4, 8)
+
+    # AI_PATROL (0), AI_BOSS (3), AI_SINE (4) horizontal patrol
     asm.label("ue_patrol_or_boss")
-    asm.ldr(R3, R4, 20)               # dir
+    # Boss Phase 2 check: if ai_type == AI_BOSS and hp <= phase2_hp -> double speed!
+    asm.cmp_imm(R1, AI_BOSS)
+    asm.b("ue_no_p2spd", "NE")
+    asm.ldr(R0, R4, 36)
+    asm.and_imm(R3, R0, 0xFF)         # current hp
+    asm.mov_reg(R0, R0, "LSR", 16)
+    asm.and_imm(R0, R0, 0xFF)         # phase2_hp
+    asm.cmp_reg(R3, R0)
+    asm.mov_reg(R2, R2, "LSL", 1, cond="LE")
+    asm.label("ue_no_p2spd")
+
+    asm.ldr(R3, R4, 20)
     asm.cmp_imm(R3, 0)
     asm.add_reg(R6, R6, R2, cond="GT")
     asm.sub_reg(R6, R6, R2, cond="LE")
-    asm.ldr(R0, R4, 12)               # min_x
+    asm.ldr(R0, R4, 12)
     asm.cmp_reg(R6, R0)
     asm.b("ue_chk_max", "GT")
     asm.mov_reg(R6, R0)
@@ -1890,7 +2335,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R3, R4, 20)
     asm.b("ue_save_x")
     asm.label("ue_chk_max")
-    asm.ldr(R0, R4, 16)               # max_x
+    asm.ldr(R0, R4, 16)
     asm.cmp_reg(R6, R0)
     asm.b("ue_save_x", "LT")
     asm.mov_reg(R6, R0)
@@ -1899,24 +2344,48 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.label("ue_save_x")
     asm.str(R6, R4, 4)
 
-    # Boss also fires aimed plasma every 64 frames!
+    # Boss aimed plasma every 64 frames (3-way spread in Phase 2!)
     asm.cmp_imm(R1, AI_BOSS)
     asm.b("ue_after_ai", "NE")
     asm.ldr(R0, R11, ST_FRAME)
     asm.and_imm(R0, R0, 63)
     asm.cmp_imm(R0, 32)
     asm.b("ue_after_ai", "NE")
+    # Center shot
     asm.add_imm(R0, R6, 8)
     asm.add_imm(R1, R7, 12)
     asm.cmp_reg(R8, R6)
     asm.mov_imm(R2, 3, cond="GE")
     asm.ldr_lit(R2, (-3) & 0xFFFFFFFF, cond="LT")
+    asm.mov_imm(R3, 0)
+    asm.bl("spawn_enemy_shot")
+    # Check Phase 2 for diagonal up & down spread shots!
+    asm.ldr(R0, R4, 36)
+    asm.and_imm(R3, R0, 0xFF)
+    asm.mov_reg(R0, R0, "LSR", 16)
+    asm.and_imm(R0, R0, 0xFF)
+    asm.cmp_reg(R3, R0)
+    asm.b("ue_after_ai", "GT")
+    # Spread UP (vy = -1)
+    asm.add_imm(R0, R6, 8)
+    asm.add_imm(R1, R7, 12)
+    asm.cmp_reg(R8, R6)
+    asm.mov_imm(R2, 3, cond="GE")
+    asm.ldr_lit(R2, (-3) & 0xFFFFFFFF, cond="LT")
+    asm.mvn_imm(R3, 0)
+    asm.bl("spawn_enemy_shot")
+    # Spread DOWN (vy = +1)
+    asm.add_imm(R0, R6, 8)
+    asm.add_imm(R1, R7, 12)
+    asm.cmp_reg(R8, R6)
+    asm.mov_imm(R2, 3, cond="GE")
+    asm.ldr_lit(R2, (-3) & 0xFFFFFFFF, cond="LT")
+    asm.mov_imm(R3, 1)
     asm.bl("spawn_enemy_shot")
 
     asm.label("ue_after_ai")
     asm.ldr(R6, R4, 4)
     asm.ldr(R7, R4, 8)
-    # Hitbox radius: 22 for 32x32 boss, 12 for 16x16 enemy
     asm.ldr(R12, R4, 36)
     asm.tst_imm(R12, 0x100)
     asm.mov_imm(R12, 22, cond="NE")
@@ -1942,18 +2411,17 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.cmp_reg(R3, R12)
     asm.b("ue_proj_next", "GT")
 
-    # Hit! Heavy bomb/missile deals 3 dmg, normal shot deals 1 dmg
+    # Hit! Heavy bomb/missile = 3 dmg, normal = 1 dmg
     asm.ldr(R3, R0, 16)
     asm.tst_imm(R3, 0x10000)
     asm.mov_imm(R3, 3, cond="NE")
     asm.mov_imm(R3, 1, cond="EQ")
     asm.mov_imm(R2, 0)
-    asm.str(R2, R0, 0)                # consume projectile
-    asm.ldr(R2, R4, 36)               # hp_and_size
+    asm.str(R2, R0, 0)
+    asm.ldr(R2, R4, 36)
     asm.and_imm(R1, R2, 0xFF)
     asm.sub_reg(R1, R1, R3, s=True)
     asm.b("ue_killed", "LE")
-    # Survived (multi-HP boss!) -> store updated HP
     asm.bic_imm(R2, R2, 0xFF)
     asm.orr_reg(R2, R2, R1)
     asm.str(R2, R4, 36)
@@ -1963,17 +2431,29 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
 
     asm.label("ue_killed")
     asm.mov_imm(R2, 0)
-    asm.str(R2, R4, 0)                # deactivate enemy
+    asm.str(R2, R4, 0)
     asm.ldr(R2, R11, ST_SCORE)
     asm.add_imm(R2, R2, 200)
     asm.str(R2, R11, ST_SCORE)
+    # Set defeat_flag bit in ST_WORLD_FLAGS if non-zero!
+    asm.ldr(R0, R4, 36)
+    asm.mov_reg(R0, R0, "LSR", 24)
+    asm.and_imm(R0, R0, 31)
+    asm.cmp_imm(R0, 0)
+    asm.b("ue_no_dflag", "EQ")
+    asm.bl("bit_mask")
+    asm.ldr(R2, R11, ST_WORLD_FLAGS)
+    asm.orr_reg(R2, R2, R0)
+    asm.str(R2, R11, ST_WORLD_FLAGS)
+    asm.label("ue_no_dflag")
     asm.ldr(R2, R4, 32)
     asm.cmp_imm(R2, AI_BOSS)
     asm.b("ue_normal_die", "NE")
-    # Boss defeated! Trigger Direct Sound DMA explosion + mark boss dead + WIN!
     asm.mov_imm(R2, 1)
     asm.str(R2, R11, ST_BOSS_DEAD)
     asm.str(R2, R11, ST_WON)
+    asm.mov_imm(R2, 16)
+    asm.str(R2, R11, ST_SHAKE)
     asm.bl("play_dma_pcm")
     asm.ldr(R0, R10, CFG_SFX_WIN)
     asm.bl("play_sfx")
@@ -2020,25 +2500,31 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pop([R4, R5, R6, R7, R8, R9, PC])
     asm.pool()
 
-    # Helper: spawn_enemy_shot(R0=x, R1=y, R2=vx) in projectile slots 4..5
+    # Helper: spawn_enemy_shot(R0=x, R1=y, R2=vx, R3=vy) in projectile slots 4..7
     asm.label("spawn_enemy_shot")
-    asm.add_imm(R3, R11, ST_PROJS + 80)  # slot 4
-    asm.ldr(R12, R3, 0)
+    asm.push([R4, R5, LR])
+    asm.add_imm(R4, R11, ST_PROJS + 80)  # slot 4
+    asm.mov_imm(R5, 4)                   # 4 enemy slots (4..7)
+    asm.label("ses_find")
+    asm.ldr(R12, R4, 0)
     asm.cmp_imm(R12, 0)
     asm.b("ses_write", "EQ")
-    asm.add_imm(R3, R3, 20)              # slot 5
-    asm.ldr(R12, R3, 0)
-    asm.cmp_imm(R12, 0)
-    asm.bx(LR, "NE")
+    asm.add_imm(R4, R4, 20)
+    asm.sub_imm(R5, R5, 1, s=True)
+    asm.b("ses_find", "NE")
+    asm.pop([R4, R5, PC])
     asm.label("ses_write")
     asm.mov_imm(R12, 1)
-    asm.str(R12, R3, 0)
-    asm.str(R0, R3, 4)
-    asm.str(R1, R3, 8)
-    asm.str(R2, R3, 12)
-    asm.mov_imm(R12, 0x20000)            # enemy shot flag
-    asm.str(R12, R3, 16)
-    asm.bx(LR)
+    asm.str(R12, R4, 0)
+    asm.str(R0, R4, 4)
+    asm.str(R1, R4, 8)
+    asm.str(R2, R4, 12)
+    asm.ldr_lit(R12, 0xFFFF)
+    asm.and_reg(R3, R3, R12)
+    asm.orr_imm(R3, R3, 0x20000)         # enemy shot flag + signed lo16 vy
+    asm.str(R3, R4, 16)
+    asm.pop([R4, R5, PC])
+    asm.pool()
 
     # ==================================================================
     # Subroutine: update_player_anim
@@ -2106,7 +2592,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.mov_reg(R1, R2, cond="GT")
     asm.str(R1, R11, ST_CAMY)
 
-    # BG2 1/2-speed parallax scroll (0x04000018 BG2HOFS, 0x1A BG2VOFS)
     asm.ldr_lit(R3, 0x04000018)
     asm.mov_reg(R2, R0, "ASR", 1)
     asm.strh(R2, R3, 0)
@@ -2117,6 +2602,17 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.sub_reg(R0, R0, R2)
     asm.ldr(R2, R10, CFG_VIEW_OY)
     asm.sub_reg(R1, R1, R2)
+    # Optional Camera Screen Shake (ST_SHAKE > 0 jitters BG0 +/- 2px!)
+    asm.ldr(R2, R11, ST_SHAKE)
+    asm.cmp_imm(R2, 0)
+    asm.b("cam_no_shake", "LE")
+    asm.tst_imm(R2, 1)
+    asm.add_imm(R0, R0, 2, cond="NE")
+    asm.sub_imm(R0, R0, 2, cond="EQ")
+    asm.tst_imm(R2, 2)
+    asm.add_imm(R1, R1, 2, cond="NE")
+    asm.sub_imm(R1, R1, 2, cond="EQ")
+    asm.label("cam_no_shake")
     asm.ldr_lit(R3, 0x04000010)
     asm.strh(R0, R3, 0)
     asm.strh(R1, R3, 2)
@@ -2124,7 +2620,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pool()
 
     # ==================================================================
-    # Subroutine: render_oam (Multi-size 16x16 / 16x32 Hero, Morph Ball, Projectiles, 32x32 Bosses!)
+    # Subroutine: render_oam (Hero, 8 Projectiles, 16 Enemies/Bosses/NPCs)
     # ==================================================================
     asm.label("render_oam")
     asm.push([R4, R5, R6, R7, R8, R9, LR])
@@ -2156,11 +2652,9 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.add_reg(R1, R1, R8)
     asm.and_imm(R1, R1, 0xFF)
 
-    # Check Morph Ball state!
     asm.ldr(R2, R11, ST_MORPHED)
     asm.cmp_imm(R2, 0)
     asm.b("oam_hero_standing", "EQ")
-    # Morphed: 16x16 square (attr0 shape=0, attr1 size=0x4000, tile=CFG_MORPH_TILE)
     asm.orr_imm(R0, R0, 0x4000)
     asm.ldr(R2, R10, CFG_MORPH_TILE)
     asm.b("oam_hero_fin")
@@ -2200,9 +2694,9 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.label("oam_hero_done")
     asm.add_imm(R4, R4, 8)
 
-    # --- OAM[1..6]: Projectiles (4 player + 2 enemy) ---
+    # --- OAM[1..8]: Projectiles (4 player + 4 enemy) ---
     asm.add_imm(R9, R11, ST_PROJS)
-    asm.mov_imm(R12, 6)
+    asm.mov_imm(R12, 8)
     asm.label("oam_proj_loop")
     asm.ldr(R0, R9, 0)
     asm.cmp_imm(R0, 0)
@@ -2241,7 +2735,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.sub_imm(R12, R12, 1, s=True)
     asm.b("oam_proj_loop", "NE")
 
-    # --- OAM[7..22]: Enemies & 32x32 Bosses ---
+    # --- OAM[9..24]: Enemies, NPCs & 32x32 Bosses ---
     asm.ldr(R0, R11, ST_ROOM_PTR)
     asm.ldr(R12, R0, RM_EN_CNT)
     asm.cmp_imm(R12, 0)
@@ -2269,7 +2763,6 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.and_imm(R1, R1, 0xFF)
     asm.ldr_lit(R3, 0x01FF)
     asm.and_reg(R0, R0, R3)
-    # 32x32 boss (bit 8 of offset 36) -> attr1 |= 0x8000, else 0x4000
     asm.ldr(R3, R9, 36)
     asm.tst_imm(R3, 0x100)
     asm.orr_imm(R0, R0, 0x8000, cond="NE")
@@ -2280,7 +2773,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr(R2, R9, 28)
     asm.ldr(R3, R9, 36)
     asm.tst_imm(R3, 0x100)
-    asm.b("oam_en_no_toggle", "NE")  # 32x32 boss uses frame 0 cleanly
+    asm.b("oam_en_no_toggle", "NE")
     asm.ldr(R3, R11, ST_FRAME)
     asm.tst_imm(R3, 16)
     asm.add_imm(R2, R2, 4, cond="NE")
@@ -2299,9 +2792,8 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.sub_imm(R12, R12, 1, s=True)
     asm.b("oam_en_loop", "NE")
 
-    # Hide remaining OAM slots up to 24
     asm.label("oam_hide_rest")
-    asm.ldr_lit(R3, 0x070000C0)
+    asm.ldr_lit(R3, 0x070000D0)
     asm.mov_imm(R0, 0x0200)
     asm.label("oam_hr_loop")
     asm.cmp_reg(R4, R3)
@@ -2315,7 +2807,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pool()
 
     # ==================================================================
-    # Subroutine: render_hud + draw_dialogue_box / clear_dialogue_box
+    # Subroutine: render_hud + Multi-Page Dialogue + Pause Auto-Minimap!
     # ==================================================================
     asm.label("render_hud")
     asm.push([R4, R5, R6, LR])
@@ -2364,11 +2856,14 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr_lit(R0, (15 << 12) | FONT_INDEX["R"])
     asm.strh(R0, R4, 0)
     asm.ldr(R0, R11, ST_ROOM_IDX)
-    asm.add_imm(R0, R0, FONT_INDEX["1"])
+    asm.add_imm(R0, R0, 1)
+    asm.cmp_imm(R0, 9)
+    asm.mov_imm(R0, 9, cond="GT")
+    asm.add_imm(R0, R0, FONT_INDEX["0"])
     asm.orr_imm(R0, R0, 0xF000)
     asm.strh(R0, R4, 2)
 
-    # Status Banner (CLEAR! / PAUSED / SAVED! / LOCKED / UPGRD! / Boss HP bars)
+    # Status Banner (CLEAR! / PAUSED / SAVED! / LOCKED / UPGRD! / SWITCH / Boss HP bars)
     asm.add_imm(R4, R4, 6)
     asm.ldr(R0, R11, ST_WON)
     asm.cmp_imm(R0, 0)
@@ -2376,7 +2871,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     for idx, ch in enumerate("CLEAR!"):
         asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[ch])
         asm.strh(R1, R4, idx * 2)
-    asm.b("hud_done")
+    asm.b("hud_var0")
 
     asm.label("hud_chk_pause")
     asm.ldr(R0, R11, ST_PAUSED)
@@ -2385,7 +2880,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     for idx, ch in enumerate("PAUSED"):
         asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[ch])
         asm.strh(R1, R4, idx * 2)
-    asm.b("hud_done")
+    asm.b("hud_var0")
 
     asm.label("hud_chk_msg")
     asm.ldr(R0, R11, ST_MSG_TIMER)
@@ -2397,25 +2892,31 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     for idx, ch in enumerate("SAVED!"):
         asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[ch])
         asm.strh(R1, R4, idx * 2)
-    asm.b("hud_done")
+    asm.b("hud_var0")
     asm.label("hud_m2")
     asm.cmp_imm(R0, 2)
     asm.b("hud_m3", "NE")
     for idx, ch in enumerate("LOCKED"):
         asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[ch])
         asm.strh(R1, R4, idx * 2)
-    asm.b("hud_done")
+    asm.b("hud_var0")
     asm.label("hud_m3")
+    asm.cmp_imm(R0, 4)
+    asm.b("hud_m3_upg", "NE")
+    for idx, ch in enumerate("SWITCH"):
+        asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[ch])
+        asm.strh(R1, R4, idx * 2)
+    asm.b("hud_var0")
+    asm.label("hud_m3_upg")
     for idx, ch in enumerate("UPGRD!"):
         asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[ch])
         asm.strh(R1, R4, idx * 2)
-    asm.b("hud_done")
+    asm.b("hud_var0")
 
     asm.label("hud_chk_boss")
     asm.ldr(R5, R11, ST_BOSS_HP)
     asm.cmp_imm(R5, 0)
     asm.b("hud_clear_msg", "LE")
-    # Draw Boss HP bar (up to 6 bars)
     asm.mov_imm(R6, 0)
     asm.label("hud_boss_bar")
     asm.mov_reg(R1, R6, "LSL", 1)
@@ -2427,22 +2928,49 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.add_imm(R6, R6, 1)
     asm.cmp_imm(R6, 6)
     asm.b("hud_boss_bar", "LT")
-    asm.b("hud_done")
+    asm.b("hud_var0")
 
     asm.label("hud_clear_msg")
     asm.ldr_lit(R1, (15 << 12) | FONT_INDEX[" "])
     for idx in range(6):
         asm.strh(R1, R4, idx * 2)
 
+    # On full GBA 240px screen (CFG_VIEW_OX == 0), draw VAR[0] Ammo/MP at top-right (cols 25..28)!
+    asm.label("hud_var0")
+    asm.ldr(R0, R10, CFG_VIEW_OX)
+    asm.cmp_imm(R0, 0)
+    asm.b("hud_done", "NE")
+    asm.ldr_lit(R4, 0x0600F000 + 25 * 2)
+    asm.ldr_lit(R0, (15 << 12) | FONT_INDEX["M"])
+    asm.strh(R0, R4, 0)
+    asm.ldr(R0, R11, ST_VARS)
+    asm.mov_imm(R1, 0)
+    asm.label("hud_vdiv10")
+    asm.cmp_imm(R0, 10)
+    asm.sub_imm(R0, R0, 10, cond="GE")
+    asm.add_imm(R1, R1, 1, cond="GE")
+    asm.b("hud_vdiv10", "GE")
+    asm.cmp_imm(R1, 9)
+    asm.mov_imm(R1, 9, cond="GT")
+    asm.add_imm(R1, R1, FONT_INDEX["0"])
+    asm.orr_imm(R1, R1, 0xF000)
+    asm.strh(R1, R4, 2)
+    asm.add_imm(R0, R0, FONT_INDEX["0"])
+    asm.orr_imm(R0, R0, 0xF000)
+    asm.strh(R0, R4, 4)
+
     asm.label("hud_done")
     asm.pop([R4, R5, R6, PC])
     asm.pool()
 
-    # Draw 2-line Navigation Terminal Dialogue Box on BG1 rows 16..17 (cols 3..26)
+    # Draw 2-line Multi-Page Dialogue Box on BG1 rows 16..17 (cols 3..26)
     asm.label("draw_dialogue_box")
     asm.push([R4, R5, R6, LR])
     asm.ldr(R4, R11, ST_ROOM_PTR)
-    asm.ldr(R4, R4, RM_DLG_PTR)       # 48 FONT_INDEX bytes
+    asm.ldr(R0, R11, ST_DIALOG_PAGE)
+    asm.cmp_imm(R0, 0)
+    asm.ldr(R4, R4, RM_DLG_PTR, cond="EQ")
+    asm.ldr(R4, R4, RM_DLG2_PTR, cond="NE")
     asm.ldr_lit(R5, 0x0600F000 + (16 * 32 + 3) * 2)
     asm.mov_imm(R6, 0)
     asm.label("ddb_l1")
@@ -2485,7 +3013,95 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.pool()
 
     # ==================================================================
-    # PSG Audio Subroutines: play_sfx & update_bgm_genie
+    # Pause-Screen Auto-Minimap on BG1 (rows 4..13, cols 6..23)
+    # ==================================================================
+    asm.label("draw_minimap")
+    asm.push([R4, R5, R6, R7, R8, LR])
+    # Fill 18x10 dark backdrop box
+    asm.ldr_lit(R0, (15 << 12) | FONT_INDEX["BOX"])
+    asm.mov_imm(R5, 4)
+    asm.label("dmm_row")
+    asm.ldr_lit(R4, 0x0600F000)
+    asm.add_reg(R4, R4, R5, "LSL", 6)
+    asm.add_imm(R4, R4, 12)           # col 6 * 2
+    asm.mov_imm(R6, 18)
+    asm.label("dmm_col")
+    asm.strh(R0, R4, 0)
+    asm.add_imm(R4, R4, 2)
+    asm.sub_imm(R6, R6, 1, s=True)
+    asm.b("dmm_col", "NE")
+    asm.add_imm(R5, R5, 1)
+    asm.cmp_imm(R5, 14)
+    asm.b("dmm_row", "LT")
+
+    # Header "MAP" at row 4, col 13
+    asm.ldr_lit(R4, 0x0600F000 + (4 * 32 + 13) * 2)
+    for idx, ch in enumerate("MAP"):
+        asm.ldr_lit(R0, (15 << 12) | FONT_INDEX[ch])
+        asm.strh(R0, R4, idx * 2)
+
+    # Plot every visited room at (col = 7 + world_x, row = 5 + world_y)
+    asm.ldr(R5, R10, CFG_ROOM_CNT)
+    asm.mov_imm(R6, 0)
+    asm.ldr_lit(R7, "ROM_ROOMS_TABLE")
+    asm.label("dmm_rm_loop")
+    asm.cmp_reg(R6, R5)
+    asm.b("dmm_done", "GE")
+    # Check ST_VISITED[R6 >> 5] & (1 << (R6 & 31))
+    asm.mov_reg(R0, R6)
+    asm.bl("bit_mask")
+    asm.mov_reg(R1, R6, "LSR", 5)
+    asm.add_imm(R2, R11, ST_VISITED)
+    asm.ldr_reg(R2, R2, R1, shift_amt=2)
+    asm.tst_reg(R2, R0)
+    asm.b("dmm_rm_next", "EQ")
+    # Visited! Read RM_WORLD_XY from room descriptor
+    asm.add_reg(R8, R7, R6, "LSL", 6)
+    asm.ldr(R0, R8, RM_WORLD_XY)
+    asm.and_imm(R1, R0, 0xF)          # world_x (0..15)
+    asm.add_imm(R1, R1, 7)
+    asm.mov_reg(R2, R0, "LSR", 8)
+    asm.and_imm(R2, R2, 7)            # world_y (0..7)
+    asm.add_imm(R2, R2, 5)
+    asm.ldr_lit(R4, 0x0600F000)
+    asm.add_reg(R4, R4, R2, "LSL", 6)
+    asm.add_reg(R4, R4, R1, "LSL", 1)
+    # Current room = Mint BAR, other visited rooms = Gold COIN
+    asm.ldr(R3, R11, ST_ROOM_IDX)
+    asm.cmp_reg(R6, R3)
+    asm.ldr_lit(R0, (15 << 12) | FONT_INDEX["BAR"], cond="EQ")
+    asm.ldr_lit(R0, (15 << 12) | FONT_INDEX["COIN"], cond="NE")
+    asm.strh(R0, R4, 0)
+    asm.label("dmm_rm_next")
+    asm.add_imm(R6, R6, 1)
+    asm.b("dmm_rm_loop")
+
+    asm.label("dmm_done")
+    asm.pop([R4, R5, R6, R7, R8, PC])
+    asm.pool()
+
+    asm.label("clear_minimap")
+    asm.push([R4, R5, R6, LR])
+    asm.ldr_lit(R0, (15 << 12) | FONT_INDEX[" "])
+    asm.mov_imm(R5, 4)
+    asm.label("cmm_row")
+    asm.ldr_lit(R4, 0x0600F000)
+    asm.add_reg(R4, R4, R5, "LSL", 6)
+    asm.add_imm(R4, R4, 12)
+    asm.mov_imm(R6, 18)
+    asm.label("cmm_col")
+    asm.strh(R0, R4, 0)
+    asm.add_imm(R4, R4, 2)
+    asm.sub_imm(R6, R6, 1, s=True)
+    asm.b("cmm_col", "NE")
+    asm.add_imm(R5, R5, 1)
+    asm.cmp_imm(R5, 14)
+    asm.b("cmm_row", "LT")
+    asm.pop([R4, R5, R6, PC])
+    asm.pool()
+
+    # ==================================================================
+    # 5-Voice GBA Audio Subroutines: play_sfx & update_bgm_genie (Ch2 + Ch3 Wave RAM + Ch4 Drums!)
     # ==================================================================
     asm.label("play_sfx")
     asm.ldr(R1, R10, CFG_SFX_CNT)
@@ -2527,20 +3143,45 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R1, R11, ST_BGM_TICK)
     asm.ldr(R0, R11, ST_BGM_STEP)
     asm.and_imm(R0, R0, 15)
-    asm.add_reg(R2, R0, R0, "LSL", 1)
-    asm.mov_reg(R2, R2, "LSL", 2)
+    # 4 words (16 bytes) per step: [c2_l, c2_h, c3_x, drum_flag]
     asm.ldr_lit(R3, "ROM_BGM_GENIE")
-    asm.add_reg(R2, R3, R2)
+    asm.add_reg(R2, R3, R0, "LSL", 4)
     asm.add_imm(R0, R0, 1)
     asm.and_imm(R0, R0, 15)
     asm.str(R0, R11, ST_BGM_STEP)
+
+    # Channel 2 Lead (0x04000068 / 0x6C)
     asm.ldr(R0, R2, 4)
     asm.cmp_imm(R0, 0)
-    asm.bx(LR, "EQ")
+    asm.b("bgm_chk_ch3", "EQ")
     asm.ldr(R1, R2, 0)
     asm.ldr_lit(R3, 0x04000068)
     asm.strh(R1, R3, 0)
     asm.strh(R0, R3, 4)
+
+    # Channel 3 4-bit Wave RAM Bass (0x04000072 / 0x74)
+    asm.label("bgm_chk_ch3")
+    asm.ldr(R0, R2, 8)
+    asm.cmp_imm(R0, 0)
+    asm.b("bgm_chk_ch4", "EQ")
+    asm.ldr_lit(R3, 0x04000070)
+    asm.ldr_lit(R1, 0x2000)           # 100% wave volume
+    asm.strh(R1, R3, 2)
+    asm.strh(R0, R3, 4)               # trigger frequency!
+
+    # Channel 4 Euclidean Drums (0x04000078 / 0x7C)
+    asm.label("bgm_chk_ch4")
+    asm.ldr(R0, R2, 12)
+    asm.cmp_imm(R0, 0)
+    asm.bx(LR, "EQ")
+    asm.ldr_lit(R3, 0x04000078)
+    asm.cmp_imm(R0, 2)
+    asm.ldr_lit(R1, 0x5100, cond="EQ")  # Kick/Snare hit
+    asm.ldr_lit(R1, 0x3100, cond="NE")  # Hi-Hat tick
+    asm.strh(R1, R3, 0)
+    asm.ldr_lit(R1, 0x8051, cond="EQ")
+    asm.ldr_lit(R1, 0x8021, cond="NE")
+    asm.strh(R1, R3, 4)
     asm.bx(LR)
     asm.pool()
 
@@ -2598,8 +3239,16 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.mov_imm(R0, 0)
     for st_off in (ST_VX, ST_VY, ST_FACING, ST_GROUND, ST_ANIM, ST_ATIMER, ST_ALOCK,
                    ST_SCORE, ST_COINS, ST_INVULN, ST_PAUSED, ST_WON, ST_DASH, ST_MELEE,
-                   ST_SHOOT_CD, ST_MORPHED, ST_DIALOG_ON, ST_MSG_TIMER, ST_BOSS_DEAD):
+                   ST_SHOOT_CD, ST_MORPHED, ST_DIALOG_ON, ST_DIALOG_PAGE, ST_MSG_TIMER,
+                   ST_BOSS_DEAD, ST_WORLD_FLAGS, ST_IN_WATER, ST_ON_LADDER, ST_TACT_CD):
         asm.str(R0, R11, st_off)
+    for vi in range(4):
+        asm.str(R0, R11, ST_VISITED + vi * 4)
+    # Initialize VAR[0..7] from ROM_START_VARS
+    asm.ldr_lit(R0, "ROM_START_VARS")
+    asm.add_imm(R1, R11, ST_VARS)
+    asm.mov_imm(R2, 16)               # 16 halfwords = 8 words
+    asm.bl("copy_halfwords")
     asm.mov_imm(R0, 5)
     asm.str(R0, R11, ST_HP)
     asm.ldr(R0, R10, CFG_START_ABIL)
@@ -2614,15 +3263,24 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
 
     asm.label("load_room")
     asm.push([R4, R5, R6, R7, LR])
-    # Clamp room_idx
     asm.ldr(R3, R10, CFG_ROOM_CNT)
     asm.cmp_reg(R0, R3)
     asm.mov_imm(R0, 0, cond="HS")
     asm.str(R0, R11, ST_ROOM_IDX)
-    # Room descriptor ptr = ROM_ROOMS_TABLE + room_idx * 64
     asm.ldr_lit(R3, "ROM_ROOMS_TABLE")
     asm.add_reg(R7, R3, R0, "LSL", 6)
     asm.str(R7, R11, ST_ROOM_PTR)
+
+    # Mark this room visited in ST_VISITED[room_idx >> 5]!
+    asm.push([R0, R1, R2])
+    asm.mov_reg(R4, R0)
+    asm.bl("bit_mask")
+    asm.mov_reg(R5, R4, "LSR", 5)
+    asm.add_imm(R6, R11, ST_VISITED)
+    asm.ldr_reg(R3, R6, R5, shift_amt=2)
+    asm.orr_reg(R3, R3, R0)
+    asm.str_reg(R3, R6, R5, shift_amt=2)
+    asm.pop([R0, R1, R2])
 
     # Set player spawn position
     asm.mov_reg(R1, R1, "LSL", 8)
@@ -2633,9 +3291,9 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.str(R0, R11, ST_VX)
     asm.str(R0, R11, ST_VY)
 
-    # Clear all 6 projectiles
+    # Clear all 8 projectiles
     asm.add_imm(R4, R11, ST_PROJS)
-    for i in range(6):
+    for i in range(8):
         asm.str(R0, R4, i * 20)
 
     # Copy room enemies (40 bytes = 20 halfwords each)
@@ -2671,12 +3329,11 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     asm.ldr_lit(R4, 0x0600D000)
     asm.ldr(R3, R7, RM_PAR_EN)
     asm.ldr(R5, R7, RM_PAR_TILE)
-    asm.mov_imm(R6, 0)                # 0..1023
+    asm.mov_imm(R6, 0)
     asm.label("lr_par_loop")
     asm.mov_imm(R0, 0)
     asm.cmp_imm(R3, 0)
     asm.b("lr_par_st", "EQ")
-    # Subtle spaced BSL grid/star parallax pattern every 4x4 tiles!
     asm.tst_imm(R6, 3)
     asm.b("lr_par_st", "NE")
     asm.tst_imm(R6, 0x60)
@@ -2754,11 +3411,22 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     # 4. Emit Packed ROM Data Tables + Official GBA SRAM Tag!
     # ------------------------------------------------------------------
     asm.align(4)
-    asm.emit_bytes(b"SRAM_V113\x00\x00\x00")  # Official GBA SRAM auto-detect identifier!
+    asm.emit_bytes(b"SRAM_V113\x00\x00\x00")
 
     asm.label("ROM_CONFIG")
     for w in config_words:
         asm.emit32(w)
+
+    asm.label("ROM_START_VARS")
+    for w in start_vars:
+        asm.emit32(w)
+
+    # 16-byte 4-bit Triangle/Sawtooth Wave RAM table for GBA PSG Channel 3 Bass
+    asm.label("ROM_WAVE_RAM")
+    asm.emit_bytes(bytes([
+        0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+        0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01,
+    ]))
 
     asm.label("ROM_ANIM_TABLE")
     for w in anim_table_words:
@@ -2780,10 +3448,10 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     for w in bgm_words:
         asm.emit32(w)
 
-    # Room Descriptor Table (64 bytes = 16 words per room)
+    # Room Descriptor Table (64 bytes = 16 words per room, up to 128 rooms!)
     asm.align(4)
     asm.label("ROM_ROOMS_TABLE")
-    for (ri, rwp, rhp, sxp, syp, _mhw, _enw, encnt, _dw, dcnt, _dlg, uab, paren, partile) in room_blobs:
+    for (ri, rwp, rhp, sxp, syp, _mhw, _enw, encnt, _dw, dcnt, _dlg, _dlg2, uab, paren, partile, wxy, sflag) in room_blobs:
         asm.emit32(rwp)
         asm.emit32(rhp)
         asm.emit32(sxp)
@@ -2797,12 +3465,12 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         asm.emit32(uab)
         asm.emit32(paren)
         asm.emit32(partile)
-        asm.emit32(0)
-        asm.emit32(0)
-        asm.emit32(0)
+        asm.emit_word_label(f"ROM_RM_DLG2_{ri}")
+        asm.emit32(wxy)
+        asm.emit32(sflag)
 
-    # Per-room tilemaps, enemies, doors, dialogues
-    for (ri, _rwp, _rhp, _sxp, _syp, mhw, enw, _encnt, dw, _dcnt, dlg, _uab, _pe, _pt) in room_blobs:
+    # Per-room tilemaps, enemies, doors, and 2-page dialogues
+    for (ri, _rwp, _rhp, _sxp, _syp, mhw, enw, _encnt, dw, _dcnt, dlg, dlg2, _uab, _pe, _pt, _wxy, _sf) in room_blobs:
         asm.align(4)
         asm.label(f"ROM_RM_MAP_{ri}")
         for hw in mhw:
@@ -2822,6 +3490,9 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         asm.align(4)
         asm.label(f"ROM_RM_DLG_{ri}")
         asm.emit_bytes(dlg)
+        asm.align(4)
+        asm.label(f"ROM_RM_DLG2_{ri}")
+        asm.emit_bytes(dlg2)
 
     asm.align(4)
     asm.label("ROM_PAL_BG")
@@ -2867,7 +3538,7 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
     return BuildReport(
         output_path=output_path,
         rom_size=len(rom),
-        format_name=f"GBA (.gba) [{project.target_system} · {len(rooms)} Room(s) · SRAM + BG2 + DMA]",
+        format_name=f"GBA v3.0 (.gba) [{project.target_system} · {project.physics_mode} · {len(rooms)} Room(s) · 5-Voice Audio]",
         title=clean_title,
         checksum_hex=f"0x{chk:02X}",
         bg_tiles=len(project.tiles),
@@ -3002,27 +3673,110 @@ def compile_gb_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
         enemies_compiled=0,
         sfx_compiled=0,
         rooms_compiled=1,
-        warnings=["Native GB/GBC export packs 2bpp tiles & D-Pad hero loop; export .gba for full Metroidvania engine, SRAM & DMA audio!"],
+        warnings=["Native GB/GBC export packs 2bpp tiles & D-Pad hero loop; export .gba for full v3.0 engine, 5-voice audio & SRAM!"],
     )
 
 
 def export_c_source(project: KinoPixelProject, output_dir: str) -> str:
+    """Export ALL project assets (palettes, 4bpp tiles, metasprites, multi-room maps, BGM, DMA PCM)
+    plus a buildable devkitARM C starter (kinopixel_assets.h, main.c, Makefile) for zero-ceiling coding!"""
     os.makedirs(output_dir, exist_ok=True)
-    lines = [
-        f"/* Generated by KinoPixel v2.0 (KinoSuite) — {project.title} ({project.target_system}) */",
+    hdr_lines = [
+        f"/* Generated by KinoPixel v3.0 (KinoSuite) — {project.title} ({project.target_system} · {project.physics_mode}) */",
         "#pragma once",
         "#include <stdint.h>",
         "",
         f"#define KP_ROOM_COUNT {len(project.rooms)}",
-        f"#define KP_LEVEL_W {project.level.width}",
-        f"#define KP_LEVEL_H {project.level.height}",
+        f"#define KP_TILE_COUNT {len(project.tiles)}",
+        f"#define KP_SPRITE_COUNT {len(project.sprites)}",
+        f"#define KP_PHYSICS_MODE {PHYSICS_MODES.get(project.physics_mode, 0)}",
         "",
-        "static const uint16_t KP_PALETTE[16] = {",
     ]
-    pal = project.get_palette_colors(0)
-    lines.append("    " + ", ".join(f"0x{hex_to_bgr555(c):04X}" for c in pal[:16]))
-    lines.append("};")
+    # Palettes
+    hdr_lines.append(f"static const uint16_t KP_PALETTES[{max(1, len(project.palettes))}][16] = {{")
+    for pi in range(max(1, len(project.palettes))):
+        cols = project.get_palette_colors(pi)[:16]
+        hdr_lines.append("    { " + ", ".join(f"0x{hex_to_bgr555(c):04X}" for c in cols) + " },")
+    hdr_lines.append("};\n")
+
+    # 4bpp BG Tiles
+    bg_bytes = bytearray()
+    for t in project.tiles[:256]:
+        bg_bytes.extend(_pack_tile_4bpp(t.pixels))
+    hdr_lines.append(f"static const uint8_t KP_BG_TILES[{max(1, len(bg_bytes))}] = {{")
+    for i in range(0, len(bg_bytes), 16):
+        hdr_lines.append("    " + ", ".join(f"0x{b:02X}" for b in bg_bytes[i:i + 16]) + ",")
+    hdr_lines.append("};\n")
+
+    # 4bpp OBJ Metasprites
+    obj_bytes = bytearray()
+    for sp in project.sprites:
+        w = 64 if sp.width >= 64 else (32 if sp.width >= 32 else 16)
+        h = 64 if sp.height >= 64 else (32 if sp.height >= 32 else 16)
+        if w == 64 or h == 64:
+            w, h = 64, 64
+        for fr in (sp.frames or [[[0] * w for _ in range(h)]]):
+            obj_bytes.extend(_pack_metasprite_4bpp(fr, w, h))
+    hdr_lines.append(f"static const uint8_t KP_OBJ_TILES[{max(1, len(obj_bytes))}] = {{")
+    for i in range(0, len(obj_bytes), 16):
+        hdr_lines.append("    " + ", ".join(f"0x{b:02X}" for b in obj_bytes[i:i + 16]) + ",")
+    hdr_lines.append("};\n")
+
+    # Room 0 Tilemap Preview
+    rm0 = project.rooms[0] if project.rooms else project.level
+    hdr_lines.append(f"#define KP_LEVEL_W {rm0.width}")
+    hdr_lines.append(f"#define KP_LEVEL_H {rm0.height}")
+    hdr_lines.append(f"static const uint16_t KP_ROOM0_MAP[{rm0.width * rm0.height}] = {{")
+    for y in range(rm0.height):
+        row = [rm0.get_tile(x, y) for x in range(rm0.width)]
+        hdr_lines.append("    " + ", ".join(f"{v}" for v in row) + ",")
+    hdr_lines.append("};\n")
+
+    # Direct Sound 8-bit Signed PCM Sample
+    pcm = generate_direct_sound_pcm(project.direct_sound)
+    hdr_lines.append(f"static const int8_t KP_DMA_PCM[{len(pcm)}] = {{")
+    for i in range(0, len(pcm), 16):
+        vals = [b - 256 if b >= 128 else b for b in pcm[i:i + 16]]
+        hdr_lines.append("    " + ", ".join(str(v) for v in vals) + ",")
+    hdr_lines.append("};\n")
+
     out_path = os.path.join(output_dir, "kinopixel_assets.h")
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write("\n".join(hdr_lines))
+
+    main_c = (
+        f"/* KinoPixel v3.0 devkitARM GBA Starter — {project.title} */\n"
+        "#include <stdint.h>\n"
+        '#include "kinopixel_assets.h"\n\n'
+        "#define REG_DISPCNT  (*(volatile uint16_t*)0x04000000)\n"
+        "#define REG_VCOUNT   (*(volatile uint16_t*)0x04000006)\n"
+        "#define PAL_BG       ((volatile uint16_t*)0x05000000)\n"
+        "#define VRAM_BG      ((volatile uint16_t*)0x06000000)\n\n"
+        "int main(void) {\n"
+        "    for (int i = 0; i < 16; ++i) PAL_BG[i] = KP_PALETTES[0][i];\n"
+        "    for (int i = 0; i < (int)sizeof(KP_BG_TILES) / 2; ++i)\n"
+        "        VRAM_BG[i] = ((const uint16_t*)KP_BG_TILES)[i];\n"
+        "    REG_DISPCNT = 0x1740; /* Mode 0 | BG0..BG2 | 1D OBJ */\n"
+        "    while (1) {\n"
+        "        while (REG_VCOUNT >= 160) {}\n"
+        "        while (REG_VCOUNT < 160) {}\n"
+        "    }\n"
+        "}\n"
+    )
+    with open(os.path.join(output_dir, "main.c"), "w", encoding="utf-8") as f:
+        f.write(main_c)
+
+    makefile = (
+        "# KinoPixel v3.0 devkitARM Makefile\n"
+        "TARGET := game\n"
+        "CC     := arm-none-eabi-gcc\n"
+        "OBJCOPY:= arm-none-eabi-objcopy\n"
+        "CFLAGS := -mthumb-interwork -marm -O2 -Wall\n"
+        "all:\n"
+        "\t$(CC) $(CFLAGS) main.c -specs=gba.specs -o $(TARGET).elf\n"
+        "\t$(OBJCOPY) -O binary $(TARGET).elf $(TARGET).gba\n"
+        "\tgbafix $(TARGET).gba\n"
+    )
+    with open(os.path.join(output_dir, "Makefile"), "w", encoding="utf-8") as f:
+        f.write(makefile)
     return out_path

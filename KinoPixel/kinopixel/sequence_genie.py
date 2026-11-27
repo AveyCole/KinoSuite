@@ -556,36 +556,47 @@ def export_genie_wav(genie: SequenceGenieData, out_path: str, bars: int = 4, sam
     return out_path
 
 
-def compile_genie_to_gba_bgm(genie: SequenceGenieData) -> Tuple[int, List[Tuple[int, int, int]]]:
-    """Compile Sequence Genie pattern to compact GBA PSG hardware step table!
+def compile_genie_to_gba_bgm(genie: SequenceGenieData) -> Tuple[int, List[Tuple[int, int, int, int]]]:
+    """Compile Sequence Genie pattern to 3-voice GBA PSG hardware step table!
 
     Returns:
-        (frames_per_step, [(ch2_cnt_l, ch2_cnt_h, ch4_drum_flag), ...]) for 16 steps.
+        (frames_per_step, [(ch2_cnt_l, ch2_cnt_h, ch3_bass_cnt_x, ch4_drum_flag), ...]) for 16 steps.
+        - Channel 2: Lead Pulse melody (0x04000068 / 0x6C)
+        - Channel 3: 4-bit Wave RAM Bassline (0x04000074, f = 65536 / (2048 - x))
+        - Channel 4: Euclidean Drums (0x04000078 / 0x7C)
     """
     genie.ensure_initialized()
-    # 60 fps / (4 steps per beat * bpm / 60) = 900 / bpm frames per 16th step
     frames_per_step = max(4, min(20, int(round(900.0 / max(60, genie.bpm)))))
     duty_bits = (genie.lead_duty & 3) << 6
     kick_pat = genie.drum_lanes[0].pattern(16) if len(genie.drum_lanes) > 0 else [False] * 16
     snare_pat = genie.drum_lanes[1].pattern(16) if len(genie.drum_lanes) > 1 else [False] * 16
     hat_pat = genie.drum_lanes[2].pattern(16) if len(genie.drum_lanes) > 2 else [False] * 16
 
-    steps_out: List[Tuple[int, int, int]] = []
+    tones = chord_tones_for_bar(genie, 0)
+    bass_root = max(36, (tones[0] - 12) if tones else 48)
+
+    steps_out: List[Tuple[int, int, int, int]] = []
     for i in range(16):
         st = genie.steps[i]
         if st.active and st.chance >= 40:
             rate = midi_to_gba_rate(st.note)
-            # SOUND2CNT_L: vol=9 (9<<12), decay step=2 (2<<8), duty_bits
             c2_l = (9 << 12) | (2 << 8) | duty_bits
-            # SOUND2CNT_H: trigger(0x8000) | rate
             c2_h = 0x8000 | rate
         else:
             c2_l = 0
             c2_h = 0
 
-        # Drum cue: 1=hat, 2=snare/kick
+        # Channel 3 Wave RAM Bass on classic driving retro steps (0, 4, 6, 8, 12, 14)
+        c3_x = 0
+        if genie.bass_enabled and i in (0, 4, 6, 8, 12, 14):
+            b_midi = bass_root + (7 if i in (6, 14) else (5 if i == 12 else 0))
+            b_hz = max(45.0, min(1200.0, midi_to_hz(b_midi)))
+            # GBA Wave Channel 3 formula: f = 65536 / (2048 - x) => x = 2048 - 65536 / f
+            b_rate = max(0, min(2047, int(round(2048.0 - 65536.0 / b_hz))))
+            c3_x = 0x8000 | b_rate
+
         drum = 2 if (snare_pat[i] or kick_pat[i]) else (1 if hat_pat[i] else 0)
-        steps_out.append((c2_l, c2_h, drum))
+        steps_out.append((c2_l, c2_h, c3_x, drum))
     return frames_per_step, steps_out
 
 

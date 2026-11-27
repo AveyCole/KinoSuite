@@ -52,6 +52,7 @@ class MiniGbaCpu:
         self.keyinput = 0x03FF  # active-LOW (all released)
         self.sfx1_triggers = 0
         self.sfx2_triggers = 0
+        self.sfx3_triggers = 0
         self.sfx4_triggers = 0
         self.dma1_triggers = 0
         self.steps = 0
@@ -119,6 +120,8 @@ class MiniGbaCpu:
             self.sfx1_triggers += 1
         if addr == 0x0400006C and (val & 0x8000):
             self.sfx2_triggers += 1
+        if addr == 0x04000074 and (val & 0x8000):
+            self.sfx3_triggers += 1
         if addr == 0x0400007C and (val & 0x8000):
             self.sfx4_triggers += 1
         if addr == 0x040000C6 and (val & 0x8000):
@@ -480,13 +483,28 @@ def test_gba_rom_hardware_execution() -> None:
 
         c_hdr = export_c_source(proj, td)
         assert os.path.isfile(c_hdr)
+        assert os.path.isfile(os.path.join(td, "main.c"))
+        assert os.path.isfile(os.path.join(td, "Makefile"))
         print(f"    PASS! Executed {cpu.steps:,} ARM7TDMI instructions cleanly (ROM {rep.rom_size // 1024} KB, Checksum {rep.checksum_hex})")
 
 
-def test_metroidvania_v2_gba_hardware() -> None:
-    print("[1b/6] Verifying BSL Fusion Metroidvania ROM (16x32 Hero, Morph, 8-Way Aim, Doors, SRAM, Boss, DMA, Dialogue)...")
-    from kinopixel.gba_compiler import ST_ABILITIES, ST_DIALOG_ON, ST_MORPHED, ST_PROJS, ST_PX, ST_PY, ST_ROOM_IDX
-    proj = create_starter_project("GBA Metroidvania (BSL Sector)")
+def test_v3_universal_gba_engine() -> None:
+    print("[1b/6] Verifying v3.0 Universal GBA Engine (5-Voice Audio, 2-Page Dialogue, Minimap, KPS3 SRAM, Vars, Multi-Genre)...")
+    from kinopixel.gba_compiler import (
+        FONT_INDEX,
+        ST_ABILITIES,
+        ST_DIALOG_ON,
+        ST_DIALOG_PAGE,
+        ST_MORPHED,
+        ST_PAUSED,
+        ST_PROJS,
+        ST_PX,
+        ST_PY,
+        ST_ROOM_IDX,
+        ST_SHAKE,
+        ST_VARS,
+    )
+    proj = create_starter_project("GBA Sci-Fi Exploration (BSL Sector)")
     assert len(proj.rooms) == 3
     with tempfile.TemporaryDirectory() as td:
         rom_path = os.path.join(td, "bsl_fusion.gba")
@@ -497,71 +515,143 @@ def test_metroidvania_v2_gba_hardware() -> None:
 
         cpu = MiniGbaCpu(rom)
         cpu.set_buttons([])
-        cpu.run_frames(5)
+        cpu.run_frames(15)
+
+        # Verify GBA PSG Channel 3 Wave RAM Bass loaded & triggered!
+        assert cpu.io[0x90] == 0x10 and cpu.io[0x97] == 0xFE, "GBA Channel 3 Wave RAM must be initialized!"
+        assert cpu.sfx2_triggers >= 1 and cpu.sfx3_triggers >= 1, f"Expected Ch2 Lead + Ch3 Wave RAM Bass BGM, got {cpu.sfx2_triggers}/{cpu.sfx3_triggers}"
 
         # 1. Verify 16x32 Tall Hero Metasprite OAM attributes
         a0, a1, _ = cpu.oam_entry(0)
         assert (a0 & 0x8000) == 0x8000 and (a1 & 0x8000) == 0x8000, f"Expected 16x32 tall hero OAM, got 0x{a0:04X}/0x{a1:04X}"
 
-        # 2. Walk right into Adam Navigation Terminal -> triggers BG1 Dialogue Box!
+        # 2. Walk right into Dialogue Terminal -> opens Page 0 -> press A -> advances to Page 1 -> press A -> closes!
         cpu.set_buttons(["RIGHT"])
         cpu.run_frames(22)
-        dlg_on = struct.unpack_from("<I", cpu.iwram, ST_DIALOG_ON)[0]
-        assert dlg_on == 1, "Stepping on Navigation Terminal must open BG1 dialogue box!"
-        # Dismiss dialogue with A!
+        assert struct.unpack_from("<I", cpu.iwram, ST_DIALOG_ON)[0] == 1, "Terminal must open BG1 dialogue box!"
+        assert struct.unpack_from("<I", cpu.iwram, ST_DIALOG_PAGE)[0] == 0
         cpu.set_buttons(["A"])
         cpu.run_frames(2)
-        assert struct.unpack_from("<I", cpu.iwram, ST_DIALOG_ON)[0] == 0, "Pressing A must dismiss dialogue!"
+        assert struct.unpack_from("<I", cpu.iwram, ST_DIALOG_ON)[0] == 1 and struct.unpack_from("<I", cpu.iwram, ST_DIALOG_PAGE)[0] == 1, "First A must advance to Page 2!"
+        cpu.set_buttons([])
+        cpu.run_frames(1)
+        cpu.set_buttons(["A"])
+        cpu.run_frames(2)
+        assert struct.unpack_from("<I", cpu.iwram, ST_DIALOG_ON)[0] == 0, "Second A must close dialogue!"
 
-        # 3. Walk right into Save Station -> writes checksummed 'KPS2' block into GBA Cartridge SRAM 0x0E000000!
+        # 3. Walk right into SRAM Checkpoint -> writes checksummed 'KPS3' block!
         cpu.set_buttons(["RIGHT"])
         cpu.run_frames(42)
-        assert cpu.sram[0:4] == b"KPS2", f"Save Station must write KPS2 SRAM magic, got {cpu.sram[0:4]!r}"
+        assert cpu.sram[0:4] == b"KPS3", f"Save Station must write KPS3 SRAM magic, got {cpu.sram[0:4]!r}"
         saved_sram = bytes(cpu.sram)
 
-        # 4. Test 8-way / upward Arm Cannon aim (hold L + press B -> projectile vy < 0!)
+        # 4. Test Conditional VAR[0] Heavy Shot (R decrements VAR[0] from 10 -> 9!)
+        v0_before = struct.unpack_from("<I", cpu.iwram, ST_VARS)[0]
+        assert v0_before == 10
+        cpu.set_buttons(["R"])
+        cpu.run_frames(2)
+        v0_after = struct.unpack_from("<I", cpu.iwram, ST_VARS)[0]
+        assert v0_after == 9, f"Pressing R should decrement VAR[0] from 10 -> 9, got {v0_after}"
+
+        # 5. Test Pause-Screen Auto-Minimap on BG1 when START pressed!
+        cpu.set_buttons(["START"])
+        cpu.run_frames(2)
+        assert struct.unpack_from("<I", cpu.iwram, ST_PAUSED)[0] == 1
+        map_m_hw = struct.unpack_from("<H", cpu.vram, 0xF000 + (4 * 32 + 13) * 2)[0]
+        assert (map_m_hw & 0x3FF) == FONT_INDEX["M"], "Pause must render BG1 Minimap header 'MAP'!"
+        cpu.set_buttons([])
+        cpu.run_frames(1)
+        cpu.set_buttons(["START"])
+        cpu.run_frames(2)
+        assert struct.unpack_from("<I", cpu.iwram, ST_PAUSED)[0] == 0
+
+        # 6. Test 8-way / upward aim (hold L + press B -> an active player projectile has vy < 0!)
+        cpu.set_buttons([])
+        cpu.run_frames(15)
         cpu.set_buttons(["L", "B"])
         cpu.run_frames(2)
-        p_vy_flags = struct.unpack_from("<I", cpu.iwram, ST_PROJS + 16)[0]
-        p_vy = p_vy_flags & 0xFFFF
-        if p_vy & 0x8000:
-            p_vy -= 0x10000
-        assert p_vy < 0, f"Holding L + B should fire upward Arm Cannon shot (vy < 0), got vy={p_vy}"
+        upward_found = False
+        for slot in range(4):
+            off = ST_PROJS + slot * 20
+            if struct.unpack_from("<I", cpu.iwram, off)[0] != 0:
+                p_vy_flags = struct.unpack_from("<I", cpu.iwram, off + 16)[0]
+                p_vy = (p_vy_flags & 0xFFFF) - (0x10000 if (p_vy_flags & 0x8000) else 0)
+                if p_vy < 0:
+                    upward_found = True
+        assert upward_found, "Holding L + B should fire an upward shot (vy < 0) in player projectile slots!"
 
-        # 5. Grant Morph Ball ability -> press SELECT -> hero shrinks to 16x16 Morph Ball OAM!
+        # 7. Grant Skill 1 -> press SELECT -> hero switches to 16x16 Compact Form OAM!
         struct.pack_into("<I", cpu.iwram, ST_ABILITIES, 0x03)
         cpu.set_buttons(["SELECT"])
         cpu.run_frames(2)
-        assert struct.unpack_from("<I", cpu.iwram, ST_MORPHED)[0] == 1, "SELECT should activate Morph Ball!"
+        assert struct.unpack_from("<I", cpu.iwram, ST_MORPHED)[0] == 1
         a0_m, a1_m, _ = cpu.oam_entry(0)
-        assert (a0_m & 0x8000) == 0 and (a1_m & 0xC000) == 0x4000, "Morphed hero must switch OAM to 16x16 Morph Ball!"
+        assert (a0_m & 0x8000) == 0 and (a1_m & 0xC000) == 0x4000
 
-        # 6. Teleport right into East Hatch (tile_x=42 -> hero left edge 41*8 so center x+8 lands on col 42!) -> warps to Room 1!
+        # 8. Enter East Door -> warps to Room 1!
         struct.pack_into("<I", cpu.iwram, ST_PX, (41 * 8) << 8)
         struct.pack_into("<I", cpu.iwram, ST_PY, (16 * 8) << 8)
         cpu.set_buttons([])
         cpu.run_frames(2)
-        assert struct.unpack_from("<I", cpu.iwram, ST_ROOM_IDX)[0] == 1, "Entering East Hatch must warp to Room 1!"
+        assert struct.unpack_from("<I", cpu.iwram, ST_ROOM_IDX)[0] == 1
 
-        # 7. Reboot fresh GBA CPU with persisted SRAM -> auto-restores saved KPS2 game!
+        # 9. Reboot fresh GBA CPU with persisted SRAM -> auto-restores saved KPS3 state!
         cpu2 = MiniGbaCpu(rom)
         cpu2.sram[:] = saved_sram
         cpu2.run_frames(3)
-        assert struct.unpack_from("<I", cpu2.iwram, ST_PX)[0] > (4 * 8) << 8, "Rebooting with valid SRAM should restore saved position!"
+        assert struct.unpack_from("<I", cpu2.iwram, ST_PX)[0] > (4 * 8) << 8
 
-        # 8. Test live playtester through all 3 rooms & Direct Sound DMA callback!
-        dma_fired = []
-        sim = GamePlaytestEngine(proj, on_dma=lambda: dma_fired.append(1))
-        sim.load_room(2)  # Boss Chamber
-        assert any(e.is_32 and e.hp == 12 for e in sim.enemies)
-        rgb = sim.render_rgb()
-        assert rgb.shape == (160, 240, 3)
-        print(f"    PASS! Executed {cpu.steps:,} ARM7TDMI Metroidvania instructions (ROM {rep.rom_size // 1024} KB, 3 Rooms, SRAM + BG2 + DMA + Boss)")
+        # 10. Multi-Genre Hardware Execution: Action-RPG (Legacy Quest), Space Action (Omega Wing), Tactical Grid (Advance Ops)!
+        rpg = create_starter_project("GBA Action-RPG (Legacy Quest)")
+        rpg_rom = os.path.join(td, "legacy_rpg.gba")
+        compile_gba_rom(rpg, rpg_rom)
+        with open(rpg_rom, "rb") as f:
+            rcpu = MiniGbaCpu(f.read())
+        rcpu.run_frames(3)
+        # Press R (Super Burst) -> triggers DMA, Screen Shake, and spends 2 from VAR[0] (12 -> 10)!
+        rcpu.set_buttons(["R"])
+        rcpu.run_frames(2)
+        assert rcpu.dma1_triggers >= 1, "Super Burst must trigger GBA Direct Sound DMA Channel A!"
+        assert struct.unpack_from("<I", rcpu.iwram, ST_SHAKE)[0] > 0, "Super Burst must activate camera screen shake!"
+        assert struct.unpack_from("<I", rcpu.iwram, ST_VARS)[0] == 10, "Super Burst should decrement VAR[0] from 12 -> 10!"
+
+        shmup = create_starter_project("GBA Space Action (Omega Wing)")
+        shmup_rom = os.path.join(td, "omega_wing.gba")
+        compile_gba_rom(shmup, shmup_rom)
+        with open(shmup_rom, "rb") as f:
+            scpu = MiniGbaCpu(f.read())
+        scpu.run_frames(3)
+        sy0 = struct.unpack_from("<I", scpu.iwram, ST_PY)[0]
+        scpu.set_buttons(["UP", "RIGHT"])
+        scpu.run_frames(8)
+        assert struct.unpack_from("<I", scpu.iwram, ST_PY)[0] < sy0, "Space Action 8-way flight must fly UP!"
+
+        tact = create_starter_project("GBA Tactical Grid (Advance Ops)")
+        tact_rom = os.path.join(td, "advance_ops.gba")
+        compile_gba_rom(tact, tact_rom)
+        with open(tact_rom, "rb") as f:
+            tcpu = MiniGbaCpu(f.read())
+        tcpu.run_frames(3)
+        tx0 = struct.unpack_from("<I", tcpu.iwram, ST_PX)[0] >> 8
+        tcpu.set_buttons(["RIGHT"])
+        tcpu.run_frames(2)
+        tx1 = struct.unpack_from("<I", tcpu.iwram, ST_PX)[0] >> 8
+        assert tx1 == tx0 + 16, f"Tactical Grid mode must step exactly +16px, got {tx0} -> {tx1}"
+
+        print(f"    PASS! Executed {cpu.steps + rcpu.steps + scpu.steps + tcpu.steps:,} ARM7TDMI instructions across 4 distinct GBA genres!")
 
 
 def test_project_roundtrip_and_undo() -> None:
-    print("[2/5] Testing .kpx save/load, undo/redo, and all 4 starter templates...")
-    for tpl in ("GBA Platformer", "GBA Top-Down RPG", "GBC Adventure", "GB Classic (DMG)"):
+    print("[2/5] Testing .kpx save/load, undo/redo, and all 7 multi-genre starter templates...")
+    for tpl in (
+        "GBA Platformer (Starbit)",
+        "GBA Sci-Fi Exploration (BSL Sector)",
+        "GBA Action-RPG (Legacy Quest)",
+        "GBA Space Action (Omega Wing)",
+        "GBA Tactical Grid (Advance Ops)",
+        "GBC Adventure",
+        "GB Classic (DMG)",
+    ):
         p = create_starter_project(tpl)
         p.title = "TESTGAME"
         p.snapshot_push("Rename")
@@ -658,9 +748,9 @@ def test_headless_studio_ui() -> None:
 
 if __name__ == "__main__":
     test_gba_rom_hardware_execution()
-    test_metroidvania_v2_gba_hardware()
+    test_v3_universal_gba_engine()
     test_project_roundtrip_and_undo()
     test_chiptune_synth()
     test_live_playtest_engine()
     test_headless_studio_ui()
-    print("\nALL KINOPIXEL v2.0 TESTS PASSED!")
+    print("\nALL KINOPIXEL v3.0 TESTS PASSED!")

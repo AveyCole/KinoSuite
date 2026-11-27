@@ -1,9 +1,14 @@
-"""Live 60fps Hardware-Faithful Metroidvania Playtest Engine for KinoPixel v2.0.
+"""Live 60fps Hardware-Faithful Playtest Engine for KinoPixel v3.0.
 
-Mirrors the exact compiled GBA ARM7TDMI v2.0 kernel: multi-room doors & ability gates,
-16x32 tall hero & 16x16 Morph Ball hitbox swap, 32x32 multi-HP Bosses, SA-X Chaser &
-Turret AI, 8-way diagonal aiming, Wall-Jump, destructible blocks, BG2 parallax,
-Save Stations, Upgrade Orbs, Direct Sound DMA cues, and Navigation Terminal dialogue.
+Mirrors the exact compiled GBA ARM7TDMI v3.0 kernel 1:1 across all genres:
+- 4 Physics Modes: Platformer (45° slopes, water swim, ladders, wall-jump),
+  Top-Down 4-Way RPG, 8-Way Free-Flight Space Action, and Tactical Grid (16px tile-step)
+- Up to 128 interconnected rooms, warp doors, switches, SRAM checkpoints & auto-minimap
+- Conditional Variable/Flag Button Wiring (VAR[0..7], World Flags 0..31, var_delta)
+- Multi-size metasprites (16x16, 16x32, 32x16, 32x32, 64x64) & Alt-Form hitbox swap
+- Universal AI: Patrol, Chaser, Turret, Multi-Phase Boss (Phase 2 3-way spread + 2x speed),
+  Sine-Wave Swooper, and Friendly NPCs with 2-page dialogue
+- Super Burst (3-way heavy spread + camera screen shake + DMA), Heal, and BG2 Parallax
 """
 from __future__ import annotations
 
@@ -20,6 +25,7 @@ from .models import (
     ACTION_AIM_UP,
     ACTION_BOMB,
     ACTION_DASH,
+    ACTION_HEAL,
     ACTION_INTERACT,
     ACTION_JUMP,
     ACTION_MELEE,
@@ -33,11 +39,18 @@ from .models import (
     ACTION_PLAY_SFX,
     ACTION_RESET_LEVEL,
     ACTION_SHOOT,
+    ACTION_SUPER_BURST,
     ACTION_SWITCH_ANIM,
     AI_BOSS,
     AI_CHASER,
+    AI_NPC,
+    AI_SINE,
     AI_TURRET,
     BUTTON_BITS,
+    COND_ABIL_OWNED,
+    COND_ALWAYS,
+    COND_FLAG_SET,
+    COND_VAR_POS,
     KinoPixelProject,
     TILE_BOUNCE,
     TILE_BREAKABLE,
@@ -45,11 +58,16 @@ from .models import (
     TILE_DOOR,
     TILE_GOAL,
     TILE_HAZARD,
+    TILE_LADDER,
     TILE_ONEWAY,
     TILE_SAVE,
+    TILE_SLOPE_L,
+    TILE_SLOPE_R,
     TILE_SOLID,
+    TILE_SWITCH,
     TILE_TERMINAL,
     TILE_UPGRADE,
+    TILE_WATER,
     TRIGGER_HELD,
     TRIGGER_PRESSED,
     TRIGGER_RELEASED,
@@ -80,11 +98,13 @@ class _LiveEnemy:
     sprite_index: int = 1
     ai_type: int = 0
     hp: int = 1
+    phase2_hp: int = 6
+    defeat_flag: int = 0
     is_32: bool = False
 
 
 class GamePlaytestEngine:
-    """Deterministic 60 FPS Metroidvania simulator matching the compiled .gba ROM kernel 1:1."""
+    """Deterministic 60 FPS universal GBA/GBC/GB simulator matching the compiled .gba ROM kernel 1:1."""
 
     def __init__(
         self,
@@ -103,6 +123,8 @@ class GamePlaytestEngine:
         self.vy: float = 0.0
         self.facing: int = 0
         self.on_ground: bool = False
+        self.in_water: bool = False
+        self.on_ladder: bool = False
         self.palette_idx: int = 0
         self.anim_name: str = "idle"
         self.anim_timer: int = 0
@@ -119,10 +141,16 @@ class GamePlaytestEngine:
         self.dash_timer: int = 0
         self.melee_timer: int = 0
         self.shoot_cd: int = 0
+        self.tact_cd: int = 0
+        self.shake_timer: int = 0
         self.abilities: int = 0
+        self.world_flags: int = 0
+        self.vars: List[int] = [10, 0, 0, 0, 0, 0, 0, 0]
+        self.visited_rooms: Set[int] = set()
         self.morphed: bool = False
         self.aim_y: int = 0
         self.dialog_text: str = ""
+        self.dialog_page: int = 0
         self.banner_msg: str = ""
         self.banner_timer: int = 0
         self.door_cd: int = 0
@@ -155,8 +183,19 @@ class GamePlaytestEngine:
         self.paused = False
         self.won = False
         self.abilities = self.project.starting_abilities
+        self.world_flags = 0
+        sv = list(self.project.starting_vars or [10, 0, 0, 0, 0, 0, 0, 0])[:8]
+        while len(sv) < 8:
+            sv.append(0)
+        self.vars = sv
+        self.visited_rooms = set()
         self.morphed = False
+        self.in_water = False
+        self.on_ladder = False
+        self.tact_cd = 0
+        self.shake_timer = 0
         self.dialog_text = ""
+        self.dialog_page = 0
         self.banner_msg = ""
         self.banner_timer = 0
         self.door_cd = 0
@@ -166,6 +205,7 @@ class GamePlaytestEngine:
     def load_room(self, r_idx: int, tx: Optional[int] = None, ty: Optional[int] = None) -> None:
         rooms = self.project.rooms or [self.project.level]
         self.room_idx = max(0, min(len(rooms) - 1, r_idx))
+        self.visited_rooms.add(self.room_idx)
         lvl = rooms[self.room_idx]
         self.cells = copy.deepcopy(lvl.cells)
         sx = lvl.spawn_x if tx is None else tx
@@ -175,7 +215,7 @@ class GamePlaytestEngine:
         self.vx = 0.0
         self.vy = 0.0
         self.on_ground = False
-        self.projs = [_LiveProj() for _ in range(6)]
+        self.projs = [_LiveProj() for _ in range(8)]
         self.enemies = []
         for e in lvl.entities[:16]:
             sp = self.project.sprites[e.sprite_index] if e.sprite_index < len(self.project.sprites) else None
@@ -187,7 +227,9 @@ class GamePlaytestEngine:
                 active=True, x=ex, y=ey, min_x=max(8.0, ex - pr),
                 max_x=min((lvl.width - (4 if is_32 else 2)) * 8.0, ex + pr),
                 direction=1, speed=max(1, min(4, e.speed)),
-                sprite_index=e.sprite_index, ai_type=e.ai_type, hp=max(1, e.hp), is_32=is_32,
+                sprite_index=e.sprite_index, ai_type=e.ai_type,
+                hp=max(1, e.hp), phase2_hp=max(0, e.phase2_hp),
+                defeat_flag=max(0, min(31, e.defeat_flag)), is_32=is_32,
             ))
         self._update_camera()
 
@@ -232,7 +274,7 @@ class GamePlaytestEngine:
         self.py = float(max(8, lvl.spawn_y * 8))
         self.vx = self.vy = 0.0
 
-    def _spawn_player_proj(self, speed: int, heavy: bool) -> None:
+    def _spawn_player_proj(self, speed: int, heavy: bool, force_vy: Optional[float] = None) -> None:
         spd = max(1, speed)
         for pr in self.projs[:4]:
             if not pr.active:
@@ -241,7 +283,13 @@ class GamePlaytestEngine:
                 pr.heavy = heavy
                 pr.x = self.px + (-8 if self.facing else 8)
                 pr.y = self.py + 4
-                if self.aim_y != 0:
+                if force_vy is not None:
+                    pr.vx = float(-spd if self.facing else spd)
+                    pr.vy = float(force_vy)
+                elif self.project.physics_mode == "shmup":
+                    pr.vx = float(-spd if self.facing else spd)
+                    pr.vy = 0.0
+                elif self.aim_y != 0:
                     horiz = bool(self.curr_keys & (BUTTON_BITS["LEFT"] | BUTTON_BITS["RIGHT"]))
                     pr.vx = (-spd if self.facing else spd) if horiz else 0.0
                     pr.vy = float(spd * self.aim_y)
@@ -249,6 +297,24 @@ class GamePlaytestEngine:
                     pr.vx = float(-spd if self.facing else spd)
                     pr.vy = 0.0
                 return
+
+    def _spawn_enemy_proj(self, x: float, y: float, vx: float, vy: float) -> None:
+        for ep in self.projs[4:]:
+            if not ep.active:
+                ep.active = True
+                ep.is_enemy = True
+                ep.heavy = False
+                ep.x = x
+                ep.y = y
+                ep.vx = vx
+                ep.vy = vy
+                return
+
+    def _open_dialogue(self) -> None:
+        lvl = self._active_room()
+        self.dialog_page = 0
+        self.dialog_text = lvl.dialogue_text
+        self._emit_sfx(self._find_sfx("coin", 1))
 
     def step(self, pressed_buttons: Set[str]) -> None:
         self.frame += 1
@@ -260,11 +326,17 @@ class GamePlaytestEngine:
         just_pressed = self.curr_keys & ~self.prev_keys
         released = self.prev_keys & ~self.curr_keys
 
-        # Dismiss Navigation Terminal Dialogue on A or B
+        # Multi-Page Dialogue Box: Page 0 -> Page 1 (if present) -> Close!
         if self.dialog_text:
             if just_pressed & (BUTTON_BITS["A"] | BUTTON_BITS["B"]):
-                self.dialog_text = ""
-                self.term_cd = 35
+                lvl = self._active_room()
+                if self.dialog_page == 0 and lvl.dialogue_page2.strip():
+                    self.dialog_page = 1
+                    self.dialog_text = lvl.dialogue_page2.strip()
+                else:
+                    self.dialog_text = ""
+                    self.dialog_page = 0
+                    self.term_cd = 35
             return
 
         if self.won:
@@ -272,7 +344,8 @@ class GamePlaytestEngine:
                 self.reset()
             return
 
-        for attr in ("invuln", "anim_lock", "dash_timer", "melee_timer", "shoot_cd", "banner_timer", "door_cd", "term_cd"):
+        for attr in ("invuln", "anim_lock", "dash_timer", "melee_timer", "shoot_cd",
+                     "banner_timer", "door_cd", "term_cd", "tact_cd", "shake_timer"):
             v = getattr(self, attr)
             if v > 0:
                 setattr(self, attr, v - 1)
@@ -283,10 +356,10 @@ class GamePlaytestEngine:
         self.aim_y = -1 if (self.curr_keys & BUTTON_BITS["UP"]) else 0
         if self.dash_timer == 0:
             self.vx = 0.0
-            if self.project.physics_mode == "topdown":
+            if self.project.physics_mode != "platformer" or self.on_ladder:
                 self.vy = 0.0
 
-        # Evaluate Button Wiring Rules
+        # Evaluate Conditional Button Wiring Rules
         for rule in self.project.button_rules:
             if not rule.enabled:
                 continue
@@ -299,18 +372,52 @@ class GamePlaytestEngine:
             if self.paused and rule.action not in (ACTION_PAUSE, ACTION_RESET_LEVEL):
                 continue
 
+            # Conditional Gate Check
+            if rule.cond_type == COND_VAR_POS:
+                if self.vars[rule.cond_idx & 7] <= 0:
+                    continue
+            elif rule.cond_type == COND_FLAG_SET:
+                if not (self.world_flags & (1 << (rule.cond_idx & 31))):
+                    continue
+            elif rule.cond_type == COND_ABIL_OWNED:
+                if not (self.abilities & rule.cond_idx):
+                    continue
+
             triggered = True
+            pmode = self.project.physics_mode
             if rule.action == ACTION_MOVE_LEFT:
-                self.vx = -rule.param * 0.5; self.facing = 1; moved = True
+                if pmode == "tactical":
+                    if self.tact_cd > 0:
+                        triggered = False
+                    else:
+                        self.tact_cd = 10; self.vx = -16.0; self.facing = 1; moved = True
+                else:
+                    self.vx = -rule.param * 0.5; self.facing = 1; moved = True
             elif rule.action == ACTION_MOVE_RIGHT:
-                self.vx = rule.param * 0.5; self.facing = 0; moved = True
+                if pmode == "tactical":
+                    if self.tact_cd > 0:
+                        triggered = False
+                    else:
+                        self.tact_cd = 10; self.vx = 16.0; self.facing = 0; moved = True
+                else:
+                    self.vx = rule.param * 0.5; self.facing = 0; moved = True
             elif rule.action == ACTION_MOVE_UP:
-                if self.project.physics_mode == "topdown":
+                if pmode == "tactical":
+                    if self.tact_cd > 0:
+                        triggered = False
+                    else:
+                        self.tact_cd = 10; self.vy = -16.0; moved = True
+                elif pmode != "platformer" or self.on_ladder:
                     self.vy = -rule.param * 0.5; moved = True
                 else:
                     self.aim_y = -1
             elif rule.action == ACTION_MOVE_DOWN:
-                if self.project.physics_mode == "topdown":
+                if pmode == "tactical":
+                    if self.tact_cd > 0:
+                        triggered = False
+                    else:
+                        self.tact_cd = 10; self.vy = 16.0; moved = True
+                elif pmode != "platformer" or self.on_ladder:
                     self.vy = rule.param * 0.5; moved = True
                 else:
                     self.aim_y = 1
@@ -318,8 +425,9 @@ class GamePlaytestEngine:
                 self.aim_y = -1
             elif rule.action == ACTION_JUMP:
                 bonus = 0.75 if (self.abilities & ABIL_HIGH_JUMP) else 0.0
-                if self.on_ground:
-                    self.vy = -(rule.param * 0.5 + 0.75 + bonus)
+                scale = 0.5 if self.in_water else 1.0
+                if self.on_ground or self.in_water or self.on_ladder:
+                    self.vy = -(rule.param * 0.5 + 0.75 + bonus) * scale
                     self.on_ground = False
                 elif self.abilities & ABIL_WALL_JUMP:
                     if self._is_solid_px(self.px - 2, self.py + 8):
@@ -346,6 +454,22 @@ class GamePlaytestEngine:
                 if self.shoot_cd == 0:
                     self.shoot_cd = 14
                     self._spawn_player_proj(rule.param, heavy=True)
+                else:
+                    triggered = False
+            elif rule.action == ACTION_SUPER_BURST:
+                if self.shoot_cd == 0:
+                    self.shoot_cd = 18
+                    self.shake_timer = 12
+                    spd = max(1, rule.param)
+                    self._spawn_player_proj(spd, heavy=True, force_vy=0.0)
+                    self._spawn_player_proj(spd, heavy=True, force_vy=-spd * 0.5)
+                    self._spawn_player_proj(spd, heavy=True, force_vy=spd * 0.5)
+                    self._emit_dma()
+                else:
+                    triggered = False
+            elif rule.action == ACTION_HEAL:
+                if self.hp < 5:
+                    self.hp += 1
                 else:
                     triggered = False
             elif rule.action == ACTION_MELEE:
@@ -377,6 +501,9 @@ class GamePlaytestEngine:
                 pass
 
             if triggered:
+                if rule.var_delta != 0:
+                    vi = rule.cond_idx & 7
+                    self.vars[vi] = max(0, self.vars[vi] + rule.var_delta)
                 if rule.anim_name and rule.trigger == TRIGGER_PRESSED:
                     self.anim_name = rule.anim_name
                     self.anim_lock = 14
@@ -386,12 +513,19 @@ class GamePlaytestEngine:
         if self.paused:
             return
 
-        if self.project.physics_mode == "platformer":
-            self.vy = min(self.project.max_fall_speed / 256.0, self.vy + self.project.gravity / 256.0)
-
         lvl = self._active_room()
         lvl_w_px, lvl_h_px = lvl.width * 8, lvl.height * 8
         hh = self._hero_h()
+
+        # Probe Water & Ladder overlap at hero center
+        center_tt = self._tile_type_at_px(self.px + 8, self.py + hh / 2.0)
+        self.in_water = center_tt == TILE_WATER
+        self.on_ladder = center_tt == TILE_LADDER
+
+        if self.project.physics_mode == "platformer" and not self.on_ladder:
+            g = (self.project.gravity / 256.0) * (0.5 if self.in_water else 1.0)
+            mf = (self.project.max_fall_speed / 256.0) * (0.5 if self.in_water else 1.0)
+            self.vy = min(mf, self.vy + g)
 
         # Horizontal move
         new_x = max(0.0, min(lvl_w_px - 16.0, self.px + self.vx))
@@ -403,25 +537,39 @@ class GamePlaytestEngine:
                 new_x = self.px; self.vx = 0.0
         self.px = new_x
 
-        # Vertical move
+        # Vertical move + 45° Slope Snapping
         self.on_ground = False
         new_y = max(0.0, self.py + self.vy)
         if new_y >= lvl_h_px - hh + 2:
-            self._damage_respawn(); self._update_camera(); return
+            if self.project.physics_mode == "platformer":
+                self._damage_respawn(); self._update_camera(); return
+            new_y = float(lvl_h_px - hh)
         if self.vy >= 0:
-            landed = False
-            for ox in (3, 12):
-                tt = self._tile_type_at_px(self.px + ox, new_y + hh)
-                if tt in (TILE_SOLID, TILE_BREAKABLE):
-                    landed = True
-                elif tt == TILE_ONEWAY:
-                    tile_top = ((int(new_y + hh)) // 8) * 8
-                    if int(self.py + hh) <= tile_top:
+            slope_hit = False
+            st = self._tile_type_at_px(self.px + 8, new_y + hh - 1)
+            if st in (TILE_SLOPE_L, TILE_SLOPE_R):
+                rx = int(self.px + 8) & 7
+                tile_top = ((int(new_y + hh - 1)) // 8) * 8
+                floor_y = tile_top + ((7 - rx) if st == TILE_SLOPE_L else rx)
+                if new_y + hh >= floor_y:
+                    new_y = float(floor_y - hh)
+                    self.vy = 0.0
+                    self.on_ground = True
+                    slope_hit = True
+            if not slope_hit:
+                landed = False
+                for ox in (3, 12):
+                    tt = self._tile_type_at_px(self.px + ox, new_y + hh)
+                    if tt in (TILE_SOLID, TILE_BREAKABLE):
                         landed = True
-            if landed:
-                new_y = float((((int(new_y + hh)) // 8) * 8) - hh)
-                self.vy = 0.0
-                self.on_ground = True
+                    elif tt == TILE_ONEWAY:
+                        tile_top = ((int(new_y + hh)) // 8) * 8
+                        if int(self.py + hh) <= tile_top:
+                            landed = True
+                if landed:
+                    new_y = float((((int(new_y + hh)) // 8) * 8) - hh)
+                    self.vy = 0.0
+                    self.on_ground = True
         else:
             if self._is_solid_px(self.px + 3, new_y + 2) or self._is_solid_px(self.px + 12, new_y + 2):
                 new_y = self.py; self.vy = 0.0
@@ -444,20 +592,26 @@ class GamePlaytestEngine:
             elif tt == TILE_UPGRADE:
                 self.cells[ty][tx] = 0
                 self.abilities |= lvl.upgrade_ability
-                self.banner_msg = "UPGRADE ACQUIRED!"; self.banner_timer = 75
+                self.vars[0] += 5
+                self.banner_msg = "SKILL UNLOCKED!"; self.banner_timer = 75
                 self._emit_sfx(self._find_sfx("clear", 5)); self._emit_dma()
+            elif tt == TILE_SWITCH:
+                bit = 1 << (lvl.switch_flag & 31)
+                if not (self.world_flags & bit):
+                    self.world_flags |= bit
+                    self.banner_msg = "SWITCH TRIGGERED!"; self.banner_timer = 70
+                    self._emit_sfx(self._find_sfx("coin", 1))
             elif tt == TILE_SAVE and self.banner_timer == 0:
                 self.hp = 5
                 self.banner_msg = "SRAM SAVED!"; self.banner_timer = 75
                 self._emit_sfx(self._find_sfx("coin", 1))
             elif tt == TILE_TERMINAL and self.term_cd == 0:
-                self.dialog_text = lvl.dialogue_text
-                self._emit_sfx(self._find_sfx("coin", 1)); break
+                self._open_dialogue(); break
             elif tt == TILE_DOOR and self.door_cd == 0:
                 dr = lvl.find_door_near(tx, ty)
                 if dr:
                     if dr.req_ability and not (self.abilities & dr.req_ability):
-                        self.banner_msg = "HATCH LOCKED!"; self.banner_timer = 45; self.door_cd = 30
+                        self.banner_msg = "LOCKED!"; self.banner_timer = 45; self.door_cd = 30
                         self._emit_sfx(self._find_sfx("hurt", 4))
                     else:
                         self.door_cd = 35
@@ -482,10 +636,14 @@ class GamePlaytestEngine:
             elif tt == TILE_SOLID:
                 pr.active = False
 
-        # Enemies & 32x32 Bosses
+        # Enemies, Friendly NPCs & Multi-Phase Bosses
         self.boss_hp = 0
         for en in self.enemies:
             if not en.active:
+                continue
+            if en.ai_type == AI_NPC:
+                if abs(self.px - en.x) <= 14 and abs(self.py - en.y) <= 16 and self.term_cd == 0:
+                    self._open_dialogue()
                 continue
             if en.ai_type == AI_BOSS:
                 self.boss_hp = en.hp
@@ -497,21 +655,22 @@ class GamePlaytestEngine:
                         en.x -= en.speed; en.direction = -1
                 elif en.ai_type == AI_TURRET:
                     if (self.frame & 63) == 0:
-                        for ep in self.projs[4:]:
-                            if not ep.active:
-                                ep.active = True; ep.is_enemy = True; ep.x = en.x; ep.y = en.y
-                                ep.vx = 2.0 if self.px >= en.x else -2.0; ep.vy = 0.0; break
+                        self._spawn_enemy_proj(en.x, en.y, 2.0 if self.px >= en.x else -2.0, 0.0)
                 else:
-                    en.x += en.direction * en.speed
+                    if en.ai_type == AI_SINE:
+                        en.y += 1.0 if (self.frame & 32) == 0 else -1.0
+                    spd = en.speed * (2 if (en.ai_type == AI_BOSS and en.hp <= en.phase2_hp) else 1)
+                    en.x += en.direction * spd
                     if en.x <= en.min_x:
                         en.x = en.min_x; en.direction = 1
                     elif en.x >= en.max_x:
                         en.x = en.max_x; en.direction = -1
                     if en.ai_type == AI_BOSS and (self.frame & 63) == 32:
-                        for ep in self.projs[4:]:
-                            if not ep.active:
-                                ep.active = True; ep.is_enemy = True; ep.x = en.x + 8; ep.y = en.y + 12
-                                ep.vx = 3.0 if self.px >= en.x else -3.0; ep.vy = 0.0; break
+                        vx = 3.0 if self.px >= en.x else -3.0
+                        self._spawn_enemy_proj(en.x + 8, en.y + 12, vx, 0.0)
+                        if en.hp <= en.phase2_hp:
+                            self._spawn_enemy_proj(en.x + 8, en.y + 12, vx, -1.0)
+                            self._spawn_enemy_proj(en.x + 8, en.y + 12, vx, 1.0)
 
             rad = 22 if en.is_32 else 12
             for pr in self.projs[:4]:
@@ -521,8 +680,10 @@ class GamePlaytestEngine:
                     en.hp -= dmg
                     if en.hp <= 0:
                         en.active = False; self.score += 200
+                        if en.defeat_flag > 0:
+                            self.world_flags |= 1 << (en.defeat_flag & 31)
                         if en.ai_type == AI_BOSS:
-                            self.won = True; self._emit_dma(); self._emit_sfx(self._find_sfx("clear", 5))
+                            self.won = True; self.shake_timer = 16; self._emit_dma(); self._emit_sfx(self._find_sfx("clear", 5))
                         else:
                             self._emit_sfx(self._find_sfx("hurt", 4))
                     else:
@@ -538,7 +699,7 @@ class GamePlaytestEngine:
 
         self.anim_timer += 1
         if self.anim_lock == 0:
-            if self.project.physics_mode == "platformer" and not self.on_ground:
+            if self.project.physics_mode == "platformer" and not self.on_ground and not self.on_ladder:
                 self.anim_name = "jump"
             elif moved:
                 self.anim_name = "walk"
@@ -550,8 +711,13 @@ class GamePlaytestEngine:
         prof = self.project.profile()
         vw, vh = int(prof["width"]), int(prof["height"])
         lvl = self._active_room()
-        self.cam_x = int(max(0, min(max(0, lvl.width * 8 - vw), int(self.px) - vw // 2 + 8)))
-        self.cam_y = int(max(0, min(max(0, lvl.height * 8 - vh), int(self.py) - vh // 2 + 8)))
+        cx = int(max(0, min(max(0, lvl.width * 8 - vw), int(self.px) - vw // 2 + 8)))
+        cy = int(max(0, min(max(0, lvl.height * 8 - vh), int(self.py) - vh // 2 + 8)))
+        if self.shake_timer > 0:
+            cx = max(0, cx + (2 if (self.shake_timer & 1) else -2))
+            cy = max(0, cy + (2 if (self.shake_timer & 2) else -2))
+        self.cam_x = cx
+        self.cam_y = cy
 
     def render_rgb(self) -> np.ndarray:
         prof = self.project.profile()
@@ -564,7 +730,7 @@ class GamePlaytestEngine:
                     for pi in range(max(1, len(self.project.palettes)))]
         lvl = self._active_room()
 
-        # BG2 1/2-speed Parallax Backdrop (with subtle alpha blend!)
+        # BG2 1/2-speed Parallax Backdrop (with optional hardware alpha blend!)
         if lvl.parallax_enabled and 0 < lvl.parallax_tile_idx < len(self.project.tiles):
             pt = self.project.tiles[lvl.parallax_tile_idx]
             ppal = pal_rgbs[pt.palette_index % len(pal_rgbs)]
