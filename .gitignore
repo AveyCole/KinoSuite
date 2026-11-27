@@ -6,8 +6,10 @@ dist/
 *.spec
 *.log
 
-# Compiled Windows Binaries (rebuild locally via build_launcher.ps1 / build_exe.py)
+# Compiled Windows Binaries (rebuild locally via build_launcher.ps1 / build_releases.py)
 *.exe
+release_assets/
+_pyi_work/
 
 # Local Studio User Data & Cloud Caches
 .kinosuite_hub/

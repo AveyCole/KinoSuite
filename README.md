@@ -13,7 +13,20 @@
 | **`Kf`** | **KinoFill** | PDF & Documents | PDF editing, interactive form filling, e-signatures, OCR, redaction & merging |
 | **`Kp`** | **KinoPixel** | Retro Games (GB/GBC/GBA) | From-scratch sprite & animation editor, 8×8 tile & 64×32 level editor, visual button wiring, **Sequence Genie** chiptune composer (19 scales, Chord Genie, Euclidean drums), live 60 FPS playtester & zero-toolchain ARM7TDMI playable `.gba` / `.gb` / `.gbc` ROM compiler |
 
-## Quick Start
+## Prebuilt Windows Downloads (No Python Required)
+
+Download ready-to-run standalone Windows `.exe` executables directly from [**GitHub Releases**](https://github.com/AveyCole/KinoSuite/releases/latest):
+
+- **`KinoSuite.exe`** — Unified KinoSuite Hub (drop alongside any `Kino*.exe` apps to launch and route files)
+- **`KinoCut.exe`** — Non-linear Video Editor
+- **`KinoShop.exe`** — Raster Photo Editor
+- **`KinoDraw.exe`** — Vector Illustration Studio
+- **`KinoWave.exe`** — Multitrack Audio & VST3/VST2 Studio
+- **`KinoFill.exe`** — PDF Editor & Form Studio
+- **`KinoPixel.exe`** — GB/GBC/GBA Game Studio with Sequence Genie & `.gba` ROM Compiler
+- **`starbit_quest.gba`** — Ready-to-play GBA ROM built with KinoPixel
+
+## Quick Start (From Source)
 
 ```powershell
 # Install core dependencies
@@ -48,3 +61,20 @@ Each app (and the Hub itself) includes a lightweight `.NET` launcher builder (`b
 python tests/test_kinosuite.py
 python KinoPixel/tests/test_kinopixel.py
 ```
+
+## Phone transfers with KinoPortal
+
+Install the bundled `KinoPortal.apk` on Android and open **KinoPortal** from the
+KinoSuite Hub. In the phone app, start sharing a folder or tap **Send files**.
+You can also choose **Send to KinoSuite** from the Android share sheet. Paste
+the phone's pairing link into the Windows receiver.
+
+Browse the shared folder or select **Phone queue**. Select files and click
+**Open in KinoSuite**. If several apps can use a file, choose the destination.
+Photos can become editable images, vector tracing references, or game sprites.
+Videos and audio can go to KinoCut's media library, audio and MIDI to KinoWave,
+PDFs to KinoFill, and native game projects to KinoPixel.
+
+**Pull files…** on the phone queue saves to **Portal Inbox**, which the Hub can
+open. Downloads are acknowledged after the file is saved, and reconnecting
+does not pull previously acknowledged files. Opening in an editor is optional.
