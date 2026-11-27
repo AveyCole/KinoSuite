@@ -1057,48 +1057,122 @@ def _create_space_action() -> KinoPixelProject:
     return proj
 
 
-ADVANCE_OPS_SCRIPT = '''# ADVANCE OPS — Full Turn-Based Tactical Strategy Engine in KinoScript (ARM7TDMI Native!)
-# Features: 15x8 Multi-Terrain Grid, 4 Unit Classes (Infantry, Mech, Tank, Artillery),
-# Terrain Defense Stars, Movement/Attack Range Highlights, Advance Wars Damage + Counter-Attack,
-# City/Factory/HQ Capture (20 pts), Daily Funds Income, Factory Build Menu, Autonomous Red AI & SRAM!
+def _make_co_portrait_32x32() -> List[List[List[int]]]:
+    """32x32 Shaded Tactical Commander Portrait for Title Screen, Briefings & War Room."""
+    leg = {".": 0, "#": 1, "W": 2, "S": 3, "G": 4, "B": 5, "C": 6, "M": 7, "E": 8, "Y": 9, "K": 10, "R": 11, "P": 12, "D": 15}
+    art = [
+        "........################........",
+        "......##BBBBBBBBBBBBBBBB##......",
+        ".....#BBCCCCCCCCCCCCCCCCBB#.....",
+        "....#BBCCBBBBBBBBBBBBBBCCBB#....",
+        "....#BBBBBBB##YYYY##BBBBBBB#....",
+        "...#BBBBBBB#YYKKKKYY#BBBBBBB#...",
+        "...#BBBBBBB##YYYYYY##BBBBBBB#...",
+        "...#BBBBBBBBBBBBBBBBBBBBBBBB#...",
+        "..###########################...",
+        "..#GGGGGGGGGGGGGGGGGGGGGGGGGG#..",
+        "...####DDDDDDDDDDDDDDDDDD####...",
+        ".....##DDSSSSSSSSSSSSSSDD##.....",
+        ".....#DDSSWWWWWWWWWWWWSSDD#.....",
+        ".....#D#SSW##########WSS#D#.....",
+        ".....#D#SS#CCWW##CCWW#SS#D#.....",
+        ".....#D#SS#CCBB##CCBB#SS#D#.....",
+        ".....#D#SS############SS#D#.....",
+        "......#DSSSWWWWWWWWWWWSSD#......",
+        "......#DDSSWWWWWWWWWWSSDD#......",
+        ".......#DDSSWW####WWSSDD#.......",
+        "........#DDSSWWWWWWSSDD#........",
+        ".........##DDSSSSSSDD##.........",
+        ".......####DDDDDDDDDD####.......",
+        ".....##BBBB##SSSSSS##BBBB##.....",
+        "....#BBCCCCBB######BBCCCCBB#....",
+        "...#BBCCBBBBBB#WW#BBBBBBCCBB#...",
+        "...#BBBBYYYYBB#WW#BBYYYYBBBB#...",
+        "..#BBBBBYKKYBB#RR#BBYKKYBBBBB#..",
+        "..#BBBBBBBBBBB#RR#BBBBBBBBBBB#..",
+        "..#BBCCBBBBBBB#RR#BBBBBBBCCBB#..",
+        "..#BBBBBBBBBBB#RR#BBBBBBBBBBB#..",
+        "..############################..",
+    ]
+    return [_parse_art(art, leg)]
 
-# Grid constants: 15 cols x 8 rows of 16x16 cells (placed at BG0 rows 2..17 = pixel Y 16..143)
+
+def _make_explosion_frames() -> List[List[List[int]]]:
+    """16x16 3-Frame Animated Battle Explosion VFX."""
+    leg = {".": 0, "#": 1, "W": 2, "Y": 9, "K": 10, "R": 11, "P": 12}
+    f0 = _parse_art([
+        "................", "................", "................", "......####......",
+        "....##RRRR##....", "...#RRKKKKRR#...", "...#RKWWWWKR#...", "...#RKWYYWKR#...",
+        "...#RKWWWWKR#...", "...#RRKKKKRR#...", "....##RRRR##....", "......####......",
+        "................", "................", "................", "................",
+    ], leg)
+    f1 = _parse_art([
+        ".....#....#.....", "...##R#..#R##...", "..#RRKK##KKRR#..", ".#RRKKWWWWKKRR#.",
+        ".#RKKWWWWWWKKR#.", "#RKKWWYYYYWWKKR#", "#RKWWYYYYYYWWKR#", ".#RKWWYYYYWWKR#.",
+        ".#RKKWWWWWWKKR#.", "#RRKKWWWWWWKKRR#", "#RRRKKWWWWKKRRR#", ".#RRRKKKKKKRRR#.",
+        "..##RRRRRRRR##..", "...##R####R##...", ".....#....#.....", "................",
+    ], leg)
+    f2 = _parse_art([
+        "..##........##..", ".#PP#..##..#PP#.", ".#P#..#RR#..#P#.", "..#..#RKKR#..#..",
+        "....#RK..KR#....", "..#.#K....K#.#..", ".#R#........#R#.", ".#R#........#R#.",
+        "..#..#....#..#..", "....#R#..#R#....", ".#P#.#RRRR#.#P#.", ".#PP#..##..#PP#.",
+        "..##........##..", "................", "................", "................",
+    ], leg)
+    return [f0, f1, f2]
+
+
+ADVANCE_OPS_SCRIPT = '''# ADVANCE OPS — Commercial-Grade Turn-Based Tactical Strategy Engine (KinoScript Native ARM7TDMI!)
+# Features:
+# - Animated Title Screen (Campaign / Briefing / SRAM Continue) + Hardware Fades (set_fade)
+# - 32x32 Commander Portrait Briefing & War Room Intel Status Screen (9-Slice Windows + Gauges)
+# - 15x8 Multi-Terrain Battlefield with Defense Stars & 4 Distinct Unit Classes (Inf/Mech/Tank/Arty)
+# - Move-then-Command Popup Menu (FIRE / CAPT / WAIT + B Undo-Move Snapback!)
+# - LIVE BATTLE FORECAST WINDOW predicting Attacker & Counter-Attack Damage before firing!
+# - Impact White Flash + Camera Screen Shake + 3-Frame Explosion VFX + Autonomous Red AI + SRAM!
+
 MAP_W = 15
 MAP_H = 8
 MAX_UNITS = 24
 
-# Terrain IDs: 1=Plain, 2=Road, 3=Woods, 4=Mtn, 5=River, 6=Bridge, 7=NeuCity, 8=BluCity, 9=RedCity, 10=BluFac, 11=RedFac, 12=BluHQ, 13=RedHQ
+# Terrain Defense Stars: 1=Plain, 2=Road, 3=Woods, 4=Mtn, 5=River, 6=Bridge, 7..13=Properties
 t_def = [0, 1, 0, 2, 4, 0, 0, 3, 3, 3, 3, 3, 4, 4]
 
-# Unit class stats: [0=Infantry, 1=Mech, 2=Tank, 3=Artillery]
+# Unit Classes: [0=Infantry, 1=Mech, 2=Tank, 3=Artillery]
 c_move = [3, 2, 5, 3]
 c_minr = [1, 1, 1, 2]
 c_maxr = [1, 1, 1, 3]
 c_atk  = [45, 65, 85, 80]
 c_cost = [1000, 2000, 3000, 4000]
 
-# Battle State
+# Modes: 0=Cursor, 1=UnitMove, 2=FactoryBuild, 3=AITurn, 4=GameOver,
+#        5=TitleScreen, 6=COBriefing, 7=UnitCmdPopup, 8=TargetForecast, 9=PauseMenu, 10=WarRoomIntel
 day = 1
-turn_team = 0          # 0=Blue (Player), 1=Red (AI)
-mode = 0               # 0=Cursor, 1=UnitSelected, 2=FactoryBuild, 3=AITurn, 4=GameOver
-winner = 0             # 1=Blue, 2=Red
+turn_team = 0
+mode = 5
+winner = 0
 cx = 2
 cy = 4
 sel_idx = -1
-build_idx = 0
+orig_x = 0
+orig_y = 0
+menu_idx = 0
+tgt_idx = -1
 funds_blu = 3000
 funds_red = 3000
 ai_idx = 0
 ai_wait = 0
 msg_timer = 0
-msg_code = 0           # 1=CAPTURE!, 2=DESTROYED!, 3=NEW UNIT!, 4=SAVED!
+msg_code = 0
 rep_cd = 0
+fade_val = -12
+flash_tmr = 0
+vfx_tmr = 0
+vfx_x = 0
+vfx_y = 0
 
-# Terrain ownership & capture HP (15*8 = 120 cells)
 t_grid = [1] * 120
 cap_hp = [20] * 120
 
-# Unit Pool (24 units)
 u_alive = [0] * 24
 u_team  = [0] * 24
 u_type  = [0] * 24
@@ -1153,33 +1227,41 @@ def can_enter(utype, x, y):
     return 1
 
 
-def calc_damage(atk_i, def_i):
+def calc_damage_pct(atk_i, def_i):
     ut = u_type[atk_i]
     dt = u_type[def_i]
     base = c_atk[ut]
-    # Anti-armor bonus: Mech vs Tank/Arty, Tank vs Infantry
     if ut == 1 and dt >= 2:
         base += 20
     if ut == 2 and dt == 0:
         base += 15
-    df_tile = t_grid[cell_idx(u_x[def_i], u_y[def_i])]
-    d_stars = t_def[df_tile]
-    # Advance Wars formula: base * (hp/10) * (10 - def_stars)/10 -> scaled to 1..10 HP damage
-    raw = (base * u_hp[atk_i] * (10 - d_stars)) // 1000
-    return max(1, raw)
+    d_stars = t_def[t_grid[cell_idx(u_x[def_i], u_y[def_i])]]
+    pct = (base * u_hp[atk_i] * (10 - d_stars)) // 100
+    return clamp(pct, 10, 99)
+
+
+def calc_damage(atk_i, def_i):
+    return max(1, calc_damage_pct(atk_i, def_i) // 10)
+
+
+def trigger_impact(gx, gy):
+    vfx_x = gx * 16
+    vfx_y = 16 + gy * 16
+    vfx_tmr = 15
+    flash_tmr = 6
 
 
 def perform_attack(atk_i, def_i):
     dmg = calc_damage(atk_i, def_i)
+    trigger_impact(u_x[def_i], u_y[def_i])
     u_hp[def_i] -= dmg
     play_sfx(4)
     if u_hp[def_i] <= 0:
         u_alive[def_i] = 0
         play_dma()
         msg_code = 2
-        msg_timer = 50
+        msg_timer = 55
     else:
-        # Counter-attack if defender is adjacent (distance == 1) and can strike back!
         dist = abs(u_x[atk_i] - u_x[def_i]) + abs(u_y[atk_i] - u_y[def_i])
         if dist == 1 and c_minr[u_type[def_i]] == 1:
             cdmg = calc_damage(def_i, atk_i)
@@ -1190,23 +1272,26 @@ def perform_attack(atk_i, def_i):
     check_victory()
 
 
+def can_capture_here(ui):
+    if u_type[ui] > 1:
+        return 0
+    tid = t_grid[cell_idx(u_x[ui], u_y[ui])]
+    tm = u_team[ui]
+    if tid == 7:
+        return 1
+    if tm == 0 and (tid == 9 or tid == 11 or tid == 13):
+        return 1
+    if tm == 1 and (tid == 8 or tid == 10 or tid == 12):
+        return 1
+    return 0
+
+
 def try_capture(ui):
-    ut = u_type[ui]
-    if ut > 1:
+    if can_capture_here(ui) == 0:
         return 0
     ci = cell_idx(u_x[ui], u_y[ui])
     tid = t_grid[ci]
     tm = u_team[ui]
-    # Check if tile is capturable neutral or enemy property
-    capturable = 0
-    if tid == 7:
-        capturable = 1
-    elif tm == 0 and (tid == 9 or tid == 11 or tid == 13):
-        capturable = 1
-    elif tm == 1 and (tid == 8 or tid == 10 or tid == 12):
-        capturable = 1
-    if capturable == 0:
-        return 0
     cap_hp[ci] -= u_hp[ui]
     play_sfx(1)
     if cap_hp[ci] <= 0:
@@ -1227,10 +1312,7 @@ def try_capture(ui):
             play_dma()
             play_sfx(4)
             return 1
-        if tid == 11 or tid == 10:
-            nt = 10 if tm == 0 else 11
-        else:
-            nt = 8 if tm == 0 else 9
+        nt = (10 if tm == 0 else 11) if (tid == 10 or tid == 11) else (8 if tm == 0 else 9)
         t_grid[ci] = nt
         draw_cell_bg0(u_x[ui], u_y[ui], nt)
         msg_code = 1
@@ -1239,62 +1321,80 @@ def try_capture(ui):
     return 1
 
 
+def find_enemy_in_range(ui, start_from):
+    ut = u_type[ui]
+    ux = u_x[ui]
+    uy = u_y[ui]
+    mnr = c_minr[ut]
+    mxr = c_maxr[ut]
+    for step in range(MAX_UNITS):
+        j = (start_from + step) % MAX_UNITS
+        if u_alive[j] and u_team[j] != u_team[ui]:
+            d = abs(u_x[j] - ux) + abs(u_y[j] - uy)
+            if d >= mnr and d <= mxr:
+                return j
+    return -1
+
+
 def check_victory():
     b_cnt = 0
     r_cnt = 0
     for i in range(MAX_UNITS):
         if u_alive[i]:
-            if u_team[i] == 0:
-                b_cnt += 1
-            else:
-                r_cnt += 1
+            if u_team[i] == 0: b_cnt += 1
+            else: r_cnt += 1
     if r_cnt == 0:
-        winner = 1
-        mode = 4
-        play_dma()
-        play_sfx(5)
+        winner = 1; mode = 4; play_dma(); play_sfx(5)
     elif b_cnt == 0:
-        winner = 2
-        mode = 4
-        play_dma()
-        play_sfx(4)
+        winner = 2; mode = 4; play_dma(); play_sfx(4)
 
 
-def award_income(team):
+def count_props(team):
     cnt = 0
     for i in range(120):
         t = t_grid[i]
-        if team == 0 and (t == 8 or t == 10 or t == 12):
+        if team == 0 and (t == 8 or t == 10 or t == 12): cnt += 1
+        elif team == 1 and (t == 9 or t == 11 or t == 13): cnt += 1
+    return cnt
+
+
+def count_units(team):
+    cnt = 0
+    for i in range(MAX_UNITS):
+        if u_alive[i] and u_team[i] == team:
             cnt += 1
-        elif team == 1 and (t == 9 or t == 11 or t == 13):
-            cnt += 1
-    if team == 0:
-        funds_blu = min(99000, funds_blu + cnt * 1000)
-    else:
-        funds_red = min(99000, funds_red + cnt * 1000)
+    return cnt
+
+
+def award_income(team):
+    inc = count_props(team) * 1000
+    if team == 0: funds_blu = min(99000, funds_blu + inc)
+    else: funds_red = min(99000, funds_red + inc)
 
 
 def refresh_team(team):
     for i in range(MAX_UNITS):
         if u_alive[i] and u_team[i] == team:
             u_acted[i] = 0
-            # Repair +2 HP on owned cities/factories/HQ!
             t = t_grid[cell_idx(u_x[i], u_y[i])]
-            own = 0
-            if team == 0 and (t == 8 or t == 10 or t == 12):
-                own = 1
-            elif team == 1 and (t == 9 or t == 11 or t == 13):
-                own = 1
+            own = 1 if ((team == 0 and (t == 8 or t == 10 or t == 12)) or (team == 1 and (t == 9 or t == 11 or t == 13))) else 0
             if own and u_hp[i] < 10:
                 u_hp[i] = min(10, u_hp[i] + 2)
 
 
-def clear_highlights():
+def save_sram_state():
+    sram_write(0, 65)  # 'A'
+    sram_write(1, 87)  # 'W'
+    sram_write(2, day & 255)
+    sram_write(3, (funds_blu // 100) & 255)
+
+
+def clear_mid_ui():
     clear_ui_rect(0, 2, 30, 16)
 
 
 def draw_range_highlights(ui):
-    clear_highlights()
+    clear_mid_ui()
     ux = u_x[ui]
     uy = u_y[ui]
     ut = u_type[ui]
@@ -1305,20 +1405,44 @@ def draw_range_highlights(ui):
         for x in range(MAP_W):
             d = abs(x - ux) + abs(y - uy)
             if d > 0 and d <= mv and can_enter(ut, x, y) and find_unit_at(x, y) == -1:
-                set_ui_tile(x * 2, 2 + y * 2, 42, 15)  # Mint move pip
+                set_ui_tile(x * 2, 2 + y * 2, 42, 15)
             occ = find_unit_at(x, y)
             if occ >= 0 and u_team[occ] != u_team[ui]:
-                # Direct unit can attack if within mv+1, Artillery if within mnr..mxr!
                 if mnr > 1:
                     if d >= mnr and d <= mxr:
-                        set_ui_tile(x * 2, 2 + y * 2, 41, 15)  # Target pip
-                else:
-                    if d <= mv + 1:
                         set_ui_tile(x * 2, 2 + y * 2, 41, 15)
+                elif d <= mv + 1:
+                    set_ui_tile(x * 2, 2 + y * 2, 41, 15)
 
 
 def draw_hud():
-    # Top HUD Bar (Row 0..1)
+    if mode == 5:
+        # Commercial 9-Slice Title Screen!
+        draw_window(2, 1, 26, 6)
+        draw_text(7, 2, "ADVANCE OPS GBA")
+        draw_text(5, 4, "TACTICAL COMMAND SUITE")
+        draw_window(10, 8, 18, 9)
+        draw_text(13, 10, "NEW CAMPAIGN")
+        draw_text(13, 12, "CO BRIEFING ")
+        draw_text(13, 14, "CONTINUE    ")
+        draw_text(11, 10 + menu_idx * 2, ">")
+        draw_window(2, 8, 7, 7)
+        draw_text(4, 18, "A:SELECT  D-PAD:MOVE")
+        return
+
+    if mode == 6:
+        # Commander Portrait Briefing Screen!
+        draw_window(1, 2, 7, 7)
+        draw_window(9, 2, 20, 10)
+        draw_text(11, 3, "CMDR VANCE (BLUE)")
+        draw_text(11, 5, "HOLD THE BRIDGES!")
+        draw_text(11, 7, "MOVE THEN PICK FIRE")
+        draw_text(11, 9, "OR CAPTURE CITIES!")
+        draw_window(4, 13, 22, 5)
+        draw_text(6, 15, "> DEPLOY TO BATTLE")
+        return
+
+    # Top Tactical Status Bar
     draw_box(0, 0, 30, 2)
     draw_text(1, 0, "DAY")
     draw_num(4, 0, day, 2)
@@ -1331,24 +1455,17 @@ def draw_hud():
     draw_text(20, 0, "AI:")
     draw_num(23, 0, funds_red, 5)
     if msg_timer > 0:
-        if msg_code == 1:
-            draw_text(1, 1, "PROPERTY CAPTURED! +1000G ")
-        elif msg_code == 2:
-            draw_text(1, 1, "ENEMY UNIT DESTROYED!     ")
-        elif msg_code == 3:
-            draw_text(1, 1, "UNIT DEPLOYED FROM BASE!  ")
-        else:
-            draw_text(1, 1, "BATTLE SAVED TO GBA SRAM! ")
-    elif mode == 1:
-        draw_text(1, 1, "A:MOVE OR ATK   B:CANCEL  ")
-    elif mode == 2:
-        draw_text(1, 1, "FACTORY: UP/DN A:BUY B:ESC")
-    elif mode == 3:
-        draw_text(1, 1, "RED ARMY AI THINKING...   ")
-    else:
-        draw_text(1, 1, "A:SEL/BUY  START:END TURN ")
+        if msg_code == 1: draw_text(1, 1, "PROPERTY CAPTURED! +1000G ")
+        elif msg_code == 2: draw_text(1, 1, "ENEMY UNIT DESTROYED!     ")
+        elif msg_code == 3: draw_text(1, 1, "REINFORCEMENT DEPLOYED!   ")
+        else: draw_text(1, 1, "SAVED TO GBA SRAM!        ")
+    elif mode == 1: draw_text(1, 1, "PICK MOVE TILE   B:CANCEL ")
+    elif mode == 7: draw_text(1, 1, "COMMAND UNIT     B:UNDO   ")
+    elif mode == 8: draw_text(1, 1, "L/R:TARGET A:FIRE B:BACK  ")
+    elif mode == 3: draw_text(1, 1, "RED ARMY AI COMMANDING... ")
+    else: draw_text(1, 1, "A:SELECT   START:CMD MENU ")
 
-    # Bottom Inspector Bar (Row 18..19)
+    # Bottom Terrain & Unit Inspector with HP Gauge Bar!
     draw_box(0, 18, 30, 2)
     tid = t_grid[cell_idx(cx, cy)]
     if tid == 1: draw_text(1, 18, "PLAIN  ")
@@ -1364,22 +1481,22 @@ def draw_hud():
     elif tid == 11: draw_text(1, 18, "R-FACT ")
     elif tid == 12: draw_text(1, 18, "BLU HQ ")
     else: draw_text(1, 18, "RED HQ ")
-    draw_text(8, 18, "DEF:")
-    draw_num(12, 18, t_def[tid], 1)
+    draw_text(8, 18, "*")
+    draw_num(9, 18, t_def[tid], 1)
 
     ui = find_unit_at(cx, cy)
     if ui >= 0:
         ut = u_type[ui]
-        if ut == 0: draw_text(15, 18, "INF ")
-        elif ut == 1: draw_text(15, 18, "MECH")
-        elif ut == 2: draw_text(15, 18, "TANK")
-        else: draw_text(15, 18, "ARTY")
-        draw_text(20, 18, "HP:")
-        draw_num(23, 18, u_hp[ui], 2)
+        if ut == 0: draw_text(12, 18, "INF ")
+        elif ut == 1: draw_text(12, 18, "MECH")
+        elif ut == 2: draw_text(12, 18, "TANK")
+        else: draw_text(12, 18, "ARTY")
+        draw_bar(17, 18, 6, u_hp[ui], 10)
+        draw_num(24, 18, u_hp[ui], 2)
         if u_team[ui] == 0:
-            draw_text(26, 18, "BLU")
+            draw_text(27, 18, "BL")
         else:
-            draw_text(26, 18, "RED")
+            draw_text(27, 18, "RD")
         draw_text(1, 19, "MV:")
         draw_num(4, 19, c_move[ut], 1)
         draw_text(7, 19, "RNG:")
@@ -1389,32 +1506,109 @@ def draw_hud():
         draw_text(16, 19, "ATK:")
         draw_num(20, 19, c_atk[ut], 2)
     else:
-        draw_text(15, 18, "EMPTY TILE    ")
-        draw_text(1, 19, "CURSOR X:")
-        draw_num(10, 19, cx, 2)
-        draw_text(13, 19, "Y:")
-        draw_num(15, 19, cy, 2)
+        draw_text(12, 18, "OPEN TERRAIN      ")
+        draw_text(1, 19, "GRID (")
+        draw_num(7, 19, cx, 2)
+        draw_text(9, 19, "/")
+        draw_num(10, 19, cy, 2)
+        draw_text(12, 19, ")   START:MENU")
 
-    if mode == 2:
-        draw_box(6, 5, 18, 7)
-        draw_text(8, 6, "BUILD UNIT:")
-        draw_text(9, 7, "INF   1000G")
-        draw_text(9, 8, "MECH  2000G")
-        draw_text(9, 9, "TANK  3000G")
-        draw_text(9, 10, "ARTY  4000G")
-        draw_text(7, 7 + build_idx, "-")
+    # Contextual 9-Slice Popups!
+    if mode == 7:
+        # Unit Command Popup (FIRE / CAPT / WAIT)
+        px = 18 if cx < 8 else 2
+        draw_window(px, 5, 10, 7)
+        if find_enemy_in_range(sel_idx, 0) >= 0:
+            draw_text(px + 3, 6, "FIRE  ")
+        else:
+            draw_text(px + 3, 6, "----  ")
+        if can_capture_here(sel_idx):
+            draw_text(px + 3, 8, "CAPT  ")
+        else:
+            draw_text(px + 3, 8, "----  ")
+        draw_text(px + 3, 10, "WAIT  ")
+        draw_text(px + 1, 6 + menu_idx * 2, ">")
+    elif mode == 8 and tgt_idx >= 0:
+        # LIVE BATTLE FORECAST WINDOW!
+        draw_window(4, 3, 22, 8)
+        draw_text(6, 4, "BATTLE FORECAST")
+        apct = calc_damage_pct(sel_idx, tgt_idx)
+        draw_text(6, 6, "ATK DMG:")
+        draw_num(15, 6, apct, 2)
+        draw_text(17, 6, "%")
+        draw_bar(19, 6, 5, apct, 100)
+        dist = abs(u_x[sel_idx] - u_x[tgt_idx]) + abs(u_y[sel_idx] - u_y[tgt_idx])
+        cpct = calc_damage_pct(tgt_idx, sel_idx) if (dist == 1 and c_minr[u_type[tgt_idx]] == 1) else 0
+        draw_text(6, 8, "CTR DMG:")
+        draw_num(15, 8, cpct, 2)
+        draw_text(17, 8, "%")
+        draw_bar(19, 8, 5, cpct, 100)
+        draw_text(6, 9, "A:ENGAGE!   B:BACK")
+    elif mode == 2:
+        # Factory Build Menu
+        draw_window(4, 4, 22, 10)
+        draw_text(6, 5, "BASE PRODUCTION")
+        draw_text(8, 7,  "INF   1000G  MV3")
+        draw_text(8, 8,  "MECH  2000G  AT+")
+        draw_text(8, 9,  "TANK  3000G  MV5")
+        draw_text(8, 10, "ARTY  4000G  R23")
+        draw_text(6, 7 + menu_idx, ">")
+        draw_text(6, 12, "FUNDS:")
+        draw_num(13, 12, funds_blu, 5)
+    elif mode == 9:
+        # Tactical Command Pause Menu
+        draw_window(7, 4, 16, 10)
+        draw_text(9, 5, "COMMAND MENU")
+        draw_text(10, 7,  "END TURN   ")
+        draw_text(10, 8,  "WAR ROOM   ")
+        draw_text(10, 9,  "SAVE SRAM  ")
+        draw_text(10, 10, "TITLE MENU ")
+        draw_text(8, 7 + menu_idx, ">")
+    elif mode == 10:
+        # War Room Intel Screen
+        draw_window(2, 3, 26, 13)
+        draw_text(8, 4, "WAR ROOM INTEL")
+        bu = count_units(0); ru = count_units(1)
+        bp = count_props(0); rp = count_props(1)
+        draw_text(4, 6, "BLUE UNITS:")
+        draw_num(16, 6, bu, 2)
+        draw_bar(19, 6, 7, bu, 12)
+        draw_text(4, 8, "RED  UNITS:")
+        draw_num(16, 8, ru, 2)
+        draw_bar(19, 8, 7, ru, 12)
+        draw_text(4, 10, "BLUE BASES:")
+        draw_num(16, 10, bp, 2)
+        draw_text(20, 10, "+")
+        draw_num(21, 10, bp * 1000, 5)
+        draw_text(4, 12, "RED  BASES:")
+        draw_num(16, 12, rp, 2)
+        draw_text(20, 12, "+")
+        draw_num(21, 12, rp * 1000, 5)
+        draw_text(7, 14, "PRESS B TO RETURN")
     elif mode == 4:
-        draw_box(6, 7, 18, 5)
+        draw_window(5, 6, 20, 6)
         if winner == 1:
             draw_text(8, 8, "BLUE VICTORY!")
         else:
             draw_text(8, 8, "RED VICTORY! ")
-        draw_text(7, 10, "START: REMATCH")
+        draw_text(7, 10, "START: NEW WAR")
 
 
 def render_all_sprites():
-    # OAM[0] = Animated Cursor
-    set_sprite(0, cx * 16, 16 + cy * 16, 0, (frame_count() >> 4) & 1, 0, 0)
+    if mode == 5:
+        hide_all_sprites()
+        set_sprite(0, 28, 76, 5, 0, 0, 0)  # 32x32 CO Portrait in Title Frame!
+        return
+    if mode == 6:
+        hide_all_sprites()
+        set_sprite(0, 20, 28, 5, 0, 0, 0)  # 32x32 CO Portrait in Briefing Frame!
+        return
+
+    # OAM[0] = Animated Cursor (snaps to target during Battle Forecast!)
+    cur_x = u_x[tgt_idx] if (mode == 8 and tgt_idx >= 0) else cx
+    cur_y = u_y[tgt_idx] if (mode == 8 and tgt_idx >= 0) else cy
+    set_sprite(0, cur_x * 16, 16 + cur_y * 16, 0, (frame_count() >> 4) & 1, 0, 0)
+
     # OAM[1..24] = Units (Blue=Pal 0, Red=Pal 1, Acted=Pal 2)
     for i in range(MAX_UNITS):
         if u_alive[i]:
@@ -1425,6 +1619,13 @@ def render_all_sprites():
         else:
             hide_sprite(1 + i)
 
+    # OAM[25] = 3-Frame Animated Explosion VFX!
+    if vfx_tmr > 0:
+        efr = 0 if vfx_tmr > 10 else (1 if vfx_tmr > 5 else 2)
+        set_sprite(25, vfx_x, vfx_y, 6, efr, 0, 0)
+    else:
+        hide_sprite(25)
+
 
 def step_ai_unit(ui):
     ut = u_type[ui]
@@ -1433,7 +1634,6 @@ def step_ai_unit(ui):
     mnr = c_minr[ut]
     mxr = c_maxr[ut]
     mv = c_move[ut]
-    # 1. Check if any Blue unit is already in attack range!
     best_t = -1
     best_hp = 99
     for j in range(MAX_UNITS):
@@ -1441,156 +1641,96 @@ def step_ai_unit(ui):
             d = abs(u_x[j] - ux) + abs(u_y[j] - uy)
             if mnr > 1:
                 if d >= mnr and d <= mxr and u_hp[j] < best_hp:
-                    best_hp = u_hp[j]
-                    best_t = j
-            else:
-                if d == 1 and u_hp[j] < best_hp:
-                    best_hp = u_hp[j]
-                    best_t = j
+                    best_hp = u_hp[j]; best_t = j
+            elif d == 1 and u_hp[j] < best_hp:
+                best_hp = u_hp[j]; best_t = j
     if best_t >= 0:
-        cx = u_x[best_t]
-        cy = u_y[best_t]
+        cx = u_x[best_t]; cy = u_y[best_t]
         perform_attack(ui, best_t)
         u_acted[ui] = 1
         return 1
 
-    # 2. Move toward nearest Blue unit or Blue HQ (1, 4)!
-    goal_x = 1
-    goal_y = 4
-    best_d = 999
+    goal_x = 1; goal_y = 4; best_d = 999
     for j in range(MAX_UNITS):
         if u_alive[j] and u_team[j] == 0:
             d = abs(u_x[j] - ux) + abs(u_y[j] - uy)
             if d < best_d:
-                best_d = d
-                goal_x = u_x[j]
-                goal_y = u_y[j]
-    bx = ux
-    by = uy
-    bscore = abs(ux - goal_x) + abs(uy - goal_y)
+                best_d = d; goal_x = u_x[j]; goal_y = u_y[j]
+    bx = ux; by = uy; bscore = abs(ux - goal_x) + abs(uy - goal_y)
     for y in range(MAP_H):
         for x in range(MAP_W):
             md = abs(x - ux) + abs(y - uy)
             if md > 0 and md <= mv and can_enter(ut, x, y) and find_unit_at(x, y) == -1:
                 sc = abs(x - goal_x) + abs(y - goal_y)
                 if sc < bscore:
-                    bscore = sc
-                    bx = x
-                    by = y
-    u_x[ui] = bx
-    u_y[ui] = by
-    cx = bx
-    cy = by
-    # Capture or attack after moving (for direct units)
+                    bscore = sc; bx = x; by = y
+    u_x[ui] = bx; u_y[ui] = by
+    cx = bx; cy = by
     if ut <= 1:
         try_capture(ui)
     if mnr == 1:
         for j in range(MAX_UNITS):
-            if u_alive[j] and u_team[j] == 0:
-                if abs(u_x[j] - bx) + abs(u_y[j] - by) == 1:
-                    perform_attack(ui, j)
-                    break
+            if u_alive[j] and u_team[j] == 0 and abs(u_x[j] - bx) + abs(u_y[j] - by) == 1:
+                perform_attack(ui, j)
+                break
     u_acted[ui] = 1
     return 1
 
 
 def ai_try_build():
-    # Red Factory at (13, 2)
     if find_unit_at(13, 2) == -1:
         if funds_red >= 3000:
-            funds_red -= 3000
-            spawn_unit(1, 2, 13, 2, 1)
-            play_sfx(1)
+            funds_red -= 3000; spawn_unit(1, 2, 13, 2, 1); play_sfx(1)
         elif funds_red >= 1000:
-            funds_red -= 1000
-            spawn_unit(1, 0, 13, 2, 1)
-            play_sfx(1)
+            funds_red -= 1000; spawn_unit(1, 0, 13, 2, 1); play_sfx(1)
 
 
-def setup_battle():
+def setup_battle(start_mode):
     clear_ui()
     hide_all_sprites()
-    day = 1
-    turn_team = 0
-    mode = 0
-    winner = 0
-    cx = 2
-    cy = 4
-    sel_idx = -1
-    funds_blu = 3000
-    funds_red = 3000
-    msg_timer = 0
-    for i in range(MAX_UNITS):
-        u_alive[i] = 0
-    for i in range(120):
-        t_grid[i] = 1
-        cap_hp[i] = 20
+    day = 1; turn_team = 0; mode = start_mode; winner = 0
+    cx = 2; cy = 4; sel_idx = -1; menu_idx = 0; tgt_idx = -1
+    funds_blu = 3000; funds_red = 3000; msg_timer = 0
+    fade_val = -10; flash_tmr = 0; vfx_tmr = 0
+    for i in range(MAX_UNITS): u_alive[i] = 0
+    for i in range(120): t_grid[i] = 1; cap_hp[i] = 20
 
-    # Sculpt Advance Wars Battlefield: River, Bridges, Woods, Mountains, Cities, Factories & HQs!
-    for y in range(MAP_H):
-        t_grid[cell_idx(7, y)] = 5  # Central River!
-    t_grid[cell_idx(7, 2)] = 6      # North Bridge
-    t_grid[cell_idx(7, 5)] = 6      # South Bridge
+    for y in range(MAP_H): t_grid[cell_idx(7, y)] = 5
+    t_grid[cell_idx(7, 2)] = 6; t_grid[cell_idx(7, 5)] = 6
     for x in range(1, 14):
         if x != 7:
-            t_grid[cell_idx(x, 2)] = 2  # North Highway
-            t_grid[cell_idx(x, 5)] = 2  # South Highway
-    # Tactical Woods & Mountains
+            t_grid[cell_idx(x, 2)] = 2; t_grid[cell_idx(x, 5)] = 2
     t_grid[cell_idx(4, 1)] = 3; t_grid[cell_idx(5, 3)] = 3; t_grid[cell_idx(4, 6)] = 3
     t_grid[cell_idx(10, 1)] = 3; t_grid[cell_idx(9, 4)] = 3; t_grid[cell_idx(10, 6)] = 3
     t_grid[cell_idx(6, 0)] = 4; t_grid[cell_idx(6, 7)] = 4; t_grid[cell_idx(8, 0)] = 4; t_grid[cell_idx(8, 7)] = 4
-    # Contested Neutral Cities
     t_grid[cell_idx(5, 1)] = 7; t_grid[cell_idx(5, 6)] = 7
     t_grid[cell_idx(9, 1)] = 7; t_grid[cell_idx(9, 6)] = 7
-    # Blue Base (West)
-    t_grid[cell_idx(1, 4)] = 12  # Blue HQ
-    t_grid[cell_idx(1, 2)] = 10  # Blue Factory
-    t_grid[cell_idx(2, 6)] = 8   # Blue City
-    # Red Base (East)
-    t_grid[cell_idx(13, 4)] = 13 # Red HQ
-    t_grid[cell_idx(13, 2)] = 11 # Red Factory
-    t_grid[cell_idx(12, 6)] = 9  # Red City
+    t_grid[cell_idx(1, 4)] = 12; t_grid[cell_idx(1, 2)] = 10; t_grid[cell_idx(2, 6)] = 8
+    t_grid[cell_idx(13, 4)] = 13; t_grid[cell_idx(13, 2)] = 11; t_grid[cell_idx(12, 6)] = 9
 
     for y in range(MAP_H):
         for x in range(MAP_W):
             draw_cell_bg0(x, y, t_grid[cell_idx(x, y)])
 
-    # Blue Army (6 balanced units)
-    spawn_unit(0, 0, 3, 2, 0)  # Infantry North
-    spawn_unit(0, 0, 3, 5, 0)  # Infantry South
-    spawn_unit(0, 1, 2, 4, 0)  # Mech HQ Guard
-    spawn_unit(0, 2, 4, 2, 0)  # Tank Vanguard
-    spawn_unit(0, 2, 4, 5, 0)  # Tank South
-    spawn_unit(0, 3, 2, 3, 0)  # Artillery Support
-
-    # Red Army (6 balanced units)
-    spawn_unit(1, 0, 11, 2, 0) # Infantry North
-    spawn_unit(1, 0, 11, 5, 0) # Infantry South
-    spawn_unit(1, 1, 12, 4, 0) # Mech HQ Guard
-    spawn_unit(1, 2, 10, 2, 0) # Tank Vanguard
-    spawn_unit(1, 2, 10, 5, 0) # Tank South
-    spawn_unit(1, 3, 12, 3, 0) # Artillery Support
+    spawn_unit(0, 0, 3, 2, 0); spawn_unit(0, 0, 3, 5, 0); spawn_unit(0, 1, 2, 4, 0)
+    spawn_unit(0, 2, 4, 2, 0); spawn_unit(0, 2, 4, 5, 0); spawn_unit(0, 3, 2, 3, 0)
+    spawn_unit(1, 0, 11, 2, 0); spawn_unit(1, 0, 11, 5, 0); spawn_unit(1, 1, 12, 4, 0)
+    spawn_unit(1, 2, 10, 2, 0); spawn_unit(1, 2, 10, 5, 0); spawn_unit(1, 3, 12, 3, 0)
     draw_hud()
     render_all_sprites()
 
 
 def on_init():
-    setup_battle()
+    setup_battle(5)  # Boot directly into Commercial 9-Slice Title Screen!
 
 
 def move_cursor_input():
-    if rep_cd > 0:
-        rep_cd -= 1
-    dx = 0
-    dy = 0
-    if key_pressed(BTN_RIGHT) or (key_held(BTN_RIGHT) and rep_cd == 0):
-        dx = 1
-    elif key_pressed(BTN_LEFT) or (key_held(BTN_LEFT) and rep_cd == 0):
-        dx = -1
-    if key_pressed(BTN_DOWN) or (key_held(BTN_DOWN) and rep_cd == 0):
-        dy = 1
-    elif key_pressed(BTN_UP) or (key_held(BTN_UP) and rep_cd == 0):
-        dy = -1
+    if rep_cd > 0: rep_cd -= 1
+    dx = 0; dy = 0
+    if key_pressed(BTN_RIGHT) or (key_held(BTN_RIGHT) and rep_cd == 0): dx = 1
+    elif key_pressed(BTN_LEFT) or (key_held(BTN_LEFT) and rep_cd == 0): dx = -1
+    if key_pressed(BTN_DOWN) or (key_held(BTN_DOWN) and rep_cd == 0): dy = 1
+    elif key_pressed(BTN_UP) or (key_held(BTN_UP) and rep_cd == 0): dy = -1
     if dx != 0 or dy != 0:
         cx = clamp(cx + dx, 0, MAP_W - 1)
         cy = clamp(cy + dy, 0, MAP_H - 1)
@@ -1599,162 +1739,185 @@ def move_cursor_input():
 
 
 def on_frame():
-    if msg_timer > 0:
-        msg_timer -= 1
+    if msg_timer > 0: msg_timer -= 1
+    if vfx_tmr > 0: vfx_tmr -= 1
+
+    # Hardware Fade & Impact Flash + Screen Shake!
+    if flash_tmr > 0:
+        flash_tmr -= 1
+        set_fade(flash_tmr * 2)
+        sh = 2 if (flash_tmr & 1) else -2
+        scroll_bg(0, sh, sh)
+    elif fade_val < 0:
+        fade_val += 2
+        set_fade(fade_val)
+        scroll_bg(0, 0, 0)
+    else:
+        set_fade(0)
+        scroll_bg(0, 0, 0)
+
+    if mode == 5:
+        if key_pressed(BTN_DOWN):
+            menu_idx = (menu_idx + 1) % 3; play_sfx(1)
+        elif key_pressed(BTN_UP):
+            menu_idx = (menu_idx + 2) % 3; play_sfx(1)
+        elif key_pressed(BTN_A) or key_pressed(BTN_START):
+            clear_ui()
+            if menu_idx == 1:
+                mode = 6; fade_val = -8; play_sfx(0)
+            else:
+                if menu_idx == 2 and sram_read(0) == 65 and sram_read(1) == 87:
+                    day = max(1, sram_read(2))
+                    funds_blu = max(1000, sram_read(3) * 100)
+                mode = 0; fade_val = -8; play_sfx(5)
+        draw_hud(); render_all_sprites()
+        return
+
+    if mode == 6:
+        if key_pressed(BTN_A) or key_pressed(BTN_START) or key_pressed(BTN_B):
+            clear_ui(); mode = 0; fade_val = -8; play_sfx(5)
+        draw_hud(); render_all_sprites()
+        return
 
     if mode == 4:
         if key_pressed(BTN_START) or key_pressed(BTN_A):
-            setup_battle()
-        draw_hud()
-        render_all_sprites()
+            setup_battle(5)
+        draw_hud(); render_all_sprites()
+        return
+
+    if mode == 10:
+        if key_pressed(BTN_B) or key_pressed(BTN_A) or key_pressed(BTN_START):
+            clear_mid_ui(); mode = 0; play_sfx(3)
+        draw_hud(); render_all_sprites()
+        return
+
+    if mode == 9:
+        if key_pressed(BTN_DOWN):
+            menu_idx = (menu_idx + 1) & 3; play_sfx(1)
+        elif key_pressed(BTN_UP):
+            menu_idx = (menu_idx + 3) & 3; play_sfx(1)
+        elif key_pressed(BTN_B) or key_pressed(BTN_START):
+            clear_mid_ui(); mode = 0; play_sfx(3)
+        elif key_pressed(BTN_A):
+            clear_mid_ui()
+            if menu_idx == 0:
+                turn_team = 1; award_income(1); refresh_team(1); ai_idx = 0; ai_wait = 8; mode = 3; play_sfx(3)
+            elif menu_idx == 1:
+                mode = 10; play_sfx(0)
+            elif menu_idx == 2:
+                save_sram_state(); msg_code = 4; msg_timer = 60; mode = 0; play_sfx(1)
+            else:
+                setup_battle(5)
+        draw_hud(); render_all_sprites()
         return
 
     if mode == 3:
-        # Autonomous Red AI Turn (paced step-by-step!)
         if ai_wait > 0:
             ai_wait -= 1
         else:
             acted_one = 0
             while ai_idx < MAX_UNITS:
                 if u_alive[ai_idx] and u_team[ai_idx] == 1 and u_acted[ai_idx] == 0:
-                    step_ai_unit(ai_idx)
-                    ai_idx += 1
-                    ai_wait = 10
-                    acted_one = 1
-                    break
+                    step_ai_unit(ai_idx); ai_idx += 1; ai_wait = 10; acted_one = 1; break
                 ai_idx += 1
             if acted_one == 0 and mode == 3:
                 ai_try_build()
-                day += 1
-                turn_team = 0
-                award_income(0)
-                refresh_team(0)
-                # Persist battle day to GBA SRAM!
-                sram_write(0, 65)  # 'A'
-                sram_write(1, 87)  # 'W'
-                sram_write(2, day & 255)
-                mode = 0
-                cx = 2
-                cy = 4
-                play_sfx(5)
-        draw_hud()
-        render_all_sprites()
+                day += 1; turn_team = 0; award_income(0); refresh_team(0)
+                save_sram_state()
+                mode = 0; cx = 2; cy = 4; play_sfx(5)
+        draw_hud(); render_all_sprites()
         return
 
     if mode == 2:
-        # Factory Build Menu
         if key_pressed(BTN_DOWN):
-            build_idx = (build_idx + 1) & 3
-            play_sfx(1)
+            menu_idx = (menu_idx + 1) & 3; play_sfx(1)
         elif key_pressed(BTN_UP):
-            build_idx = (build_idx + 3) & 3
-            play_sfx(1)
+            menu_idx = (menu_idx + 3) & 3; play_sfx(1)
         elif key_pressed(BTN_B):
-            clear_highlights()
-            mode = 0
-            play_sfx(3)
+            clear_mid_ui(); mode = 0; play_sfx(3)
         elif key_pressed(BTN_A):
-            cost = c_cost[build_idx]
+            cost = c_cost[menu_idx]
             if funds_blu >= cost:
-                funds_blu -= cost
-                spawn_unit(0, build_idx, cx, cy, 1)
-                msg_code = 3
-                msg_timer = 50
-                play_sfx(5)
-                clear_highlights()
-                mode = 0
+                funds_blu -= cost; spawn_unit(0, menu_idx, cx, cy, 1)
+                msg_code = 3; msg_timer = 50; play_sfx(5); clear_mid_ui(); mode = 0
             else:
                 play_sfx(4)
-        draw_hud()
-        render_all_sprites()
+        draw_hud(); render_all_sprites()
         return
 
-    # Mode 0 (Cursor) or Mode 1 (Unit Selected)
-    move_cursor_input()
+    if mode == 7:
+        # Unit Command Popup (0=FIRE, 1=CAPT, 2=WAIT) — B snaps unit back to orig_x, orig_y!
+        if key_pressed(BTN_DOWN):
+            menu_idx = (menu_idx + 1) % 3; play_sfx(1)
+        elif key_pressed(BTN_UP):
+            menu_idx = (menu_idx + 2) % 3; play_sfx(1)
+        elif key_pressed(BTN_B):
+            u_x[sel_idx] = orig_x; u_y[sel_idx] = orig_y
+            cx = orig_x; cy = orig_y
+            clear_mid_ui(); mode = 1; draw_range_highlights(sel_idx); play_sfx(3)
+        elif key_pressed(BTN_A):
+            if menu_idx == 0:
+                t0 = find_enemy_in_range(sel_idx, 0)
+                if t0 >= 0:
+                    tgt_idx = t0; clear_mid_ui(); mode = 8; play_sfx(0)
+                else:
+                    play_sfx(4)
+            elif menu_idx == 1:
+                if can_capture_here(sel_idx):
+                    try_capture(sel_idx); u_acted[sel_idx] = 1
+                    clear_mid_ui(); sel_idx = -1
+                    if mode == 7: mode = 0
+                else:
+                    play_sfx(4)
+            else:
+                u_acted[sel_idx] = 1; clear_mid_ui(); sel_idx = -1; mode = 0; play_sfx(1)
+        draw_hud(); render_all_sprites()
+        return
 
+    if mode == 8:
+        # Target Selector with LIVE BATTLE FORECAST!
+        if key_pressed(BTN_RIGHT) or key_pressed(BTN_DOWN):
+            tgt_idx = find_enemy_in_range(sel_idx, tgt_idx + 1); play_sfx(1)
+        elif key_pressed(BTN_LEFT) or key_pressed(BTN_UP):
+            tgt_idx = find_enemy_in_range(sel_idx, tgt_idx + 1); play_sfx(1)
+        elif key_pressed(BTN_B):
+            clear_mid_ui(); mode = 7; play_sfx(3)
+        elif key_pressed(BTN_A) and tgt_idx >= 0:
+            perform_attack(sel_idx, tgt_idx)
+            u_acted[sel_idx] = 1
+            clear_mid_ui(); sel_idx = -1; tgt_idx = -1
+            if mode == 8: mode = 0
+        draw_hud(); render_all_sprites()
+        return
+
+    move_cursor_input()
     if mode == 0:
         if key_pressed(BTN_START):
-            # End Player Turn -> Launch Autonomous Red AI Turn!
-            clear_highlights()
-            turn_team = 1
-            award_income(1)
-            refresh_team(1)
-            ai_idx = 0
-            ai_wait = 8
-            mode = 3
-            play_sfx(3)
+            clear_mid_ui(); menu_idx = 0; mode = 9; play_sfx(0)
         elif key_pressed(BTN_A):
             ui = find_unit_at(cx, cy)
             if ui >= 0 and u_team[ui] == 0 and u_acted[ui] == 0:
-                sel_idx = ui
-                mode = 1
-                draw_range_highlights(ui)
-                play_sfx(0)
+                sel_idx = ui; orig_x = u_x[ui]; orig_y = u_y[ui]
+                mode = 1; draw_range_highlights(ui); play_sfx(0)
             elif ui == -1 and t_grid[cell_idx(cx, cy)] == 10:
-                build_idx = 0
-                mode = 2
-                play_sfx(0)
+                menu_idx = 0; mode = 2; play_sfx(0)
             else:
                 play_sfx(3)
     elif mode == 1:
         if key_pressed(BTN_B):
-            clear_highlights()
-            sel_idx = -1
-            mode = 0
-            play_sfx(3)
+            clear_mid_ui(); sel_idx = -1; mode = 0; play_sfx(3)
         elif key_pressed(BTN_A):
-            ux = u_x[sel_idx]
-            uy = u_y[sel_idx]
+            d = abs(cx - orig_x) + abs(cy - orig_y)
             ut = u_type[sel_idx]
-            d = abs(cx - ux) + abs(cy - uy)
             tgt = find_unit_at(cx, cy)
-            if tgt >= 0 and u_team[tgt] == 1:
-                # Attack enemy!
-                can_atk = 0
-                if c_minr[ut] > 1:
-                    if d >= c_minr[ut] and d <= c_maxr[ut]:
-                        can_atk = 1
-                else:
-                    if d <= c_move[ut] + 1:
-                        can_atk = 1
-                if can_atk:
-                    # Move adjacent if direct unit and distance > 1
-                    if c_minr[ut] == 1 and d > 1:
-                        if can_enter(ut, cx - 1, cy) and find_unit_at(cx - 1, cy) == -1:
-                            u_x[sel_idx] = cx - 1; u_y[sel_idx] = cy
-                        elif can_enter(ut, cx + 1, cy) and find_unit_at(cx + 1, cy) == -1:
-                            u_x[sel_idx] = cx + 1; u_y[sel_idx] = cy
-                        elif can_enter(ut, cx, cy - 1) and find_unit_at(cx, cy - 1) == -1:
-                            u_x[sel_idx] = cx; u_y[sel_idx] = cy - 1
-                        elif can_enter(ut, cx, cy + 1) and find_unit_at(cx, cy + 1) == -1:
-                            u_x[sel_idx] = cx; u_y[sel_idx] = cy + 1
-                    perform_attack(sel_idx, tgt)
-                    u_acted[sel_idx] = 1
-                    clear_highlights()
-                    sel_idx = -1
-                    if mode == 1:
-                        mode = 0
-                else:
-                    play_sfx(4)
-            elif tgt == -1 and d <= c_move[ut] and can_enter(ut, cx, cy):
-                u_x[sel_idx] = cx
-                u_y[sel_idx] = cy
-                try_capture(sel_idx)
-                u_acted[sel_idx] = 1
-                clear_highlights()
-                sel_idx = -1
-                if mode == 1:
-                    mode = 0
-                play_sfx(0)
-            elif tgt == sel_idx:
-                # Stay & capture/wait in place!
-                try_capture(sel_idx)
-                u_acted[sel_idx] = 1
-                clear_highlights()
-                sel_idx = -1
-                if mode == 1:
-                    mode = 0
-                play_sfx(1)
+            if (tgt == -1 or tgt == sel_idx) and d <= c_move[ut] and can_enter(ut, cx, cy):
+                u_x[sel_idx] = cx; u_y[sel_idx] = cy
+                clear_mid_ui()
+                # Smart default menu cursor: FIRE if enemy in range, else CAPT if capturable, else WAIT!
+                if find_enemy_in_range(sel_idx, 0) >= 0: menu_idx = 0
+                elif can_capture_here(sel_idx): menu_idx = 1
+                else: menu_idx = 2
+                mode = 7; play_sfx(0)
             else:
                 play_sfx(4)
 
@@ -1764,75 +1927,75 @@ def on_frame():
 
 
 def _make_tactical_tiles() -> List[TileAsset]:
-    """14 distinct tactical terrain tiles (Plain, Road, Woods, Mountain, River, Bridge, Cities, Factories, HQs)."""
+    """14 richly shaded GBA tactical terrain tiles (Multi-tone Plains, Layered Woods, Snow Peaks, Cities, HQs)."""
     leg = {".": 0, "#": 1, "W": 2, "S": 3, "G": 4, "B": 5, "C": 6, "M": 7, "E": 8, "Y": 9, "K": 10, "R": 11, "P": 12, "D": 15}
     return [
         TileAsset("HUD Empty", TILE_EMPTY, 0, empty_grid(8, 8, 0)),
         TileAsset("Plains (DEF 1)", TILE_EMPTY, 0, _parse_art([
-            "MMMMMMMM", "MMEMMMMM", "MMMMMMMM", "MMMMMMEM",
-            "MMMMMMMM", "MEMMMMMM", "MMMMMMMM", "MMMMEMMM",
+            "MMEMMMMM", "MMMMMMMM", "MMMMMMEM", "MMKMMMMM",
+            "MMMMMMMM", "MEMMMMMM", "MMMMMEMM", "MMMMMMMM",
         ], leg)),
         TileAsset("Road (DEF 0)", TILE_EMPTY, 0, _parse_art([
             "GGGGGGGG", "GSSSSSSG", "GSGGGGSG", "GSWWGGSG",
             "GSGGGGSG", "GSGGWWSG", "GSSSSSSG", "GGGGGGGG",
         ], leg)),
         TileAsset("Woods (DEF 2)", TILE_EMPTY, 0, _parse_art([
-            "MM####MM", "M#EEEE#M", "#EEMMEE#", "#EE##EE#",
-            "M#E##E#M", "MM#DD#MM", "MM#DD#MM", "MMMMMMMM",
+            "MM####MM", "M#EMME#M", "#EMKKME#", "#EEEMEE#",
+            "M#E##E#M", "MM#DD#MM", "M##DD##M", "MMMMMMMM",
         ], leg)),
         TileAsset("Mountain (DEF 4)", TILE_SOLID, 0, _parse_art([
-            "...##...", "..#WW#..", ".#WSSW#.", ".#SSSS#.",
-            "#SSGGSS#", "#GGGGGG#", "#GG##GG#", "########",
+            "...##...", "..#WW#..", ".#WWSS#.", ".#SSGG#.",
+            "#SSGGGG#", "#GG##GG#", "#G####G#", "########",
         ], leg)),
         TileAsset("River (Blocked)", TILE_WATER, 0, _parse_art([
-            "BBBBBBBB", "BWWBBBBW", "BBBBBBBB", "BBCCBBBB",
-            "BBBBBBBB", "BBBBWWBB", "BBBBBBBB", "CCBBBBCC",
+            "BBBBBBBB", "BWWCBBBB", "BBBBBBBB", "BBCCWBBB",
+            "BBBBBBBB", "BBBBWWCB", "BBBBBBBB", "CCBBBBCC",
         ], leg)),
         TileAsset("Bridge (DEF 0)", TILE_EMPTY, 0, _parse_art([
-            "########", "DDDDDDDD", "D#DDDD#D", "DDDDDDDD",
-            "DDDDDDDD", "D#DDDD#D", "DDDDDDDD", "########",
+            "########", "DYYYYYYD", "D#DDDD#D", "DDDDDDDD",
+            "DDDDDDDD", "D#DDDD#D", "DYYYYYYD", "########",
         ], leg)),
         TileAsset("Neutral City", TILE_EMPTY, 0, _parse_art([
-            "........", ".######.", "#SSSSSS#", "#S#WW#S#",
-            "#SSSSSS#", "#S#WW#S#", "#SSSSSS#", "########",
+            "........", ".######.", "#SWWWWS#", "#S#KK#S#",
+            "#SSSSSS#", "#S#WW#S#", "#SGGGGS#", "########",
         ], leg)),
         TileAsset("Blue City", TILE_EMPTY, 0, _parse_art([
-            "........", ".######.", "#BBBBBB#", "#B#CC#B#",
-            "#BBBBBB#", "#B#WW#B#", "#BBBBBB#", "########",
+            "........", ".######.", "#BCCCCB#", "#B#KK#B#",
+            "#BBBBBB#", "#B#WW#B#", "#B####B#", "########",
         ], leg)),
         TileAsset("Red City", TILE_EMPTY, 0, _parse_art([
-            "........", ".######.", "#RRRRRR#", "#R#PP#R#",
-            "#RRRRRR#", "#R#WW#R#", "#RRRRRR#", "########",
+            "........", ".######.", "#RPPPPR#", "#R#KK#R#",
+            "#RRRRRR#", "#R#WW#R#", "#R####R#", "########",
         ], leg)),
         TileAsset("Blue Factory", TILE_EMPTY, 0, _parse_art([
-            ".##.....", ".#B#####", "#BBBBBB#", "#B#KK#B#",
-            "#BBBBBB#", "#B#WW#B#", "#BBBBBB#", "########",
+            ".##.....", ".#C#####", "#BCCCCB#", "#B#KK#B#",
+            "#BBBBBB#", "#B#WW#B#", "#BGGGGB#", "########",
         ], leg)),
         TileAsset("Red Factory", TILE_EMPTY, 0, _parse_art([
-            ".##.....", ".#R#####", "#RRRRRR#", "#R#KK#R#",
-            "#RRRRRR#", "#R#WW#R#", "#RRRRRR#", "########",
+            ".##.....", ".#P#####", "#RPPPPR#", "#R#KK#R#",
+            "#RRRRRR#", "#R#WW#R#", "#RGGGGR#", "########",
         ], leg)),
         TileAsset("Blue HQ", TILE_EMPTY, 0, _parse_art([
-            "...##...", "..#CC#..", ".#BBBB#.", "#BBWWBB#",
-            "#BBWWBB#", "#BBBBBB#", "#B#CC#B#", "########",
+            "...##...", "..#CC#..", ".#BWWB#.", "#BCKKCB#",
+            "#BCCCCB#", "#BBBBBB#", "#B#WW#B#", "########",
         ], leg)),
         TileAsset("Red HQ", TILE_EMPTY, 0, _parse_art([
-            "...##...", "..#KK#..", ".#RRRR#.", "#RRWWRR#",
-            "#RRWWRR#", "#RRRRRR#", "#R#KK#R#", "########",
+            "...##...", "..#KK#..", ".#RWW#..", "#RPKKPR#",
+            "#RPPPPR#", "#RRRRRR#", "#R#WW#R#", "########",
         ], leg)),
     ]
 
 
 def _create_tactical_grid() -> KinoPixelProject:
-    """Showcase 4: Genuine Advance Wars-Class Turn-Based Tactical Strategy Game powered by KinoScript!"""
+    """Showcase 4: Commercial-Grade Turn-Based Tactical Strategy Game powered by KinoScript!"""
     blue_pal = [
-        "#101424", "#181E2E", "#F8FAFC", "#CBD5E1",
+        "#101424", "#121826", "#F8FAFC", "#CBD5E1",
         "#64748B", "#2563EB", "#38BDF8", "#22C55E",
         "#15803D", "#F59E0B", "#FDE047", "#EF4444",
         "#FB7185", "#A855F7", "#0284C7", "#92400E",
     ]
     red_pal = [
-        "#101424", "#181E2E", "#F8FAFC", "#FED7AA",
+        "#101424", "#121826", "#F8FAFC", "#FED7AA",
         "#64748B", "#DC2626", "#FB7185", "#22C55E",
         "#15803D", "#F59E0B", "#FDE047", "#EF4444",
         "#FB7185", "#A855F7", "#0284C7", "#92400E",
@@ -1850,6 +2013,8 @@ def _create_tactical_grid() -> KinoPixelProject:
     mech = SpriteAsset(name="Mech Bazooka", role="enemy", width=16, height=16, palette_index=0, frames=_make_mech_frames(), animations=[AnimationClip("idle", [0], fps=4, loop=True)])
     tank = SpriteAsset(name="Battle Tank", role="enemy", width=16, height=16, palette_index=0, frames=_make_tank_unit_frames(), animations=[AnimationClip("idle", [0, 1], fps=6, loop=True)])
     arty = SpriteAsset(name="Artillery", role="enemy", width=16, height=16, palette_index=0, frames=_make_artillery_frames(), animations=[AnimationClip("idle", [0], fps=4, loop=True)])
+    co_port = SpriteAsset(name="Commander Portrait (32×32)", role="prop", width=32, height=32, palette_index=0, frames=_make_co_portrait_32x32(), animations=[AnimationClip("idle", [0], fps=4, loop=True)])
+    boom = SpriteAsset(name="Battle Explosion (3f)", role="projectile", width=16, height=16, palette_index=0, frames=_make_explosion_frames(), animations=[AnimationClip("boom", [0, 1, 2], fps=12, loop=False)])
 
     tiles = _make_tactical_tiles()
     sfx = _make_default_sfx()
@@ -1862,10 +2027,10 @@ def _create_tactical_grid() -> KinoPixelProject:
 
     proj = KinoPixelProject(
         title="ADVANCE OPS", game_code="KAW1", maker_code="KP", target_system="GBA",
-        physics_mode="tactical", gravity=0, max_fall_speed=512, bg_color_hex="#0D1322",
+        physics_mode="tactical", gravity=0, max_fall_speed=512, bg_color_hex="#0D1528",
         alpha_blend_enabled=False, sram_save_enabled=True, starting_abilities=ABIL_NONE,
         starting_vars=[30, 0, 0, 0, 0, 0, 0, 0],
-        palettes=pals, sprites=[cursor, infantry, mech, tank, arty], tiles=tiles,
+        palettes=pals, sprites=[cursor, infantry, mech, tank, arty, co_port, boom], tiles=tiles,
         rooms=[rm0], active_room_idx=0, button_rules=[], sfx_list=sfx,
         direct_sound=DirectSoundConfig(enabled=True, preset="Boss Explosion", sample_rate=8192),
         script_enabled=True,

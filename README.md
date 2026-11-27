@@ -11,7 +11,7 @@
 | **`Kd`** | **KinoDraw** | Vector & Graphics | Precision Bezier vector illustration, artboards, typography, image trace & SVG |
 | **`Kw`** | **KinoWave** | Audio & Mastering | 32-bit float multitrack audio studio, 46+ DSP FX, spectrogram, MIDI & VST3/VST2 host |
 | **`Kf`** | **KinoFill** | PDF & Documents | PDF editing, interactive form filling, e-signatures, OCR, redaction & merging |
-| **`Kp`** | **KinoPixel v3.0** | Retro Games (GB/GBC/GBA) | Universal GB/GBC/GBA studio — `16×16` to `64×64` metasprites, up to 128 maps, **Visual Wiring + KinoScript Native ARM7TDMI Compiler** (full 128-OAM, 3-BG, 240 KB RAM custom engine for any genre: Turn-Based Strategy, Action-RPG, Space Action, Exploration), 5-voice audio (PSG Ch1-4 incl. Wave RAM bass + Direct Sound DMA + **Sequence Genie**), SRAM saves, playable `.gba`/`.gb`/`.gbc` ROMs & full `devkitARM` C export |
+| **`Kp`** | **KinoPixel v3.0** | Retro Games (GB/GBC/GBA) | Universal GB/GBC/GBA studio — `16×16` to `64×64` metasprites, **Pro Pixel Art tools** (Dither, Luminance Shade, Auto-Outline, PNG Sprite Sheet/Portrait Importer w/ 15-color BGR555 quantization), up to 128 maps, **Visual Wiring + 9-Slice GBA UI/Menu Designer + KinoScript Native ARM7TDMI Compiler** (full 128-OAM, 3-BG, 9-slice windows, segmented gauges, hardware fades/flashes, 240 KB RAM custom engine for any genre), 5-voice audio (PSG Ch1-4 + Direct Sound DMA + **Sequence Genie**), SRAM saves, playable `.gba`/`.gb`/`.gbc` ROMs & full `devkitARM` C export |
 
 ## Prebuilt Windows Downloads (No Python Required)
 

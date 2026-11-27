@@ -99,8 +99,9 @@ def main() -> int:
                 "--collect-binaries", "_sounddevice_data",
                 "--hidden-import", "sounddevice",
                 "--hidden-import", "_sounddevice_data",
+                "--hidden-import", "PIL.Image",
             ],
-            ["cv2", "PIL", "reportlab", "pypdf", "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtSvg", "PySide6.QtPrintSupport"],
+            ["cv2", "reportlab", "pypdf", "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtSvg", "PySide6.QtPrintSupport"],
         ),
         (
             "KinoShop",
@@ -139,11 +140,15 @@ def main() -> int:
             continue
         build_one(name, entry, ico, args, excl)
 
-    # Copy already-standalone KinoWave.exe & KinoCut.exe + starter GBA ROM
+    # Copy already-standalone KinoWave.exe & KinoCut.exe + all 5 showcase GBA ROMs
     for src, dst_name in [
         (os.path.join(ROOT, "KinoWave", "KinoWave.exe"), "KinoWave.exe"),
         (os.path.join(ROOT, "KinoCut.exe"), "KinoCut.exe"),
         (os.path.join(ROOT, "KinoPixel", "examples", "starbit_quest.gba"), "starbit_quest.gba"),
+        (os.path.join(ROOT, "KinoPixel", "examples", "bsl_fusion.gba"), "bsl_fusion.gba"),
+        (os.path.join(ROOT, "KinoPixel", "examples", "legacy_rpg.gba"), "legacy_rpg.gba"),
+        (os.path.join(ROOT, "KinoPixel", "examples", "omega_wing.gba"), "omega_wing.gba"),
+        (os.path.join(ROOT, "KinoPixel", "examples", "advance_ops.gba"), "advance_ops.gba"),
     ]:
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(OUT_DIR, dst_name))

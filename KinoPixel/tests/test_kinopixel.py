@@ -636,30 +636,50 @@ def test_v3_universal_gba_engine() -> None:
         with open(tact_rom, "rb") as f:
             tcpu = MiniGbaCpu(f.read())
         tcpu.run_frames(3)
-        # Verify Cursor OAM[0] and 12 initial Blue+Red Units OAM[1..12] are live on GBA hardware!
+        # 1. Verify Title Screen 9-Slice Window corner (WIN_UL) in BG1 VRAM, Hardware Fade (REG_BLDCNT/BLDY), & 32x32 CO Portrait in OAM[0]!
+        win_ul_hw = struct.unpack_from("<H", tcpu.vram, 0xF000 + (1 * 32 + 2) * 2)[0]
+        assert (win_ul_hw & 0x3FF) == FONT_INDEX["WIN_UL"], "Title Screen must render 9-slice beveled window!"
+        bldcnt = struct.unpack_from("<H", tcpu.io, 0x50)[0]
+        bldy = struct.unpack_from("<H", tcpu.io, 0x54)[0]
+        assert bldcnt != 0 and bldy > 0, f"Title fade-in must drive GBA REG_BLDCNT/REG_BLDY, got 0x{bldcnt:X}/0x{bldy:X}"
+        pa0, pa1, _ = tcpu.oam_entry(0)
+        assert (pa0 & 0x0200) == 0 and (pa1 & 0xC000) == 0x8000, "Title Screen must show 32x32 Commander Portrait!"
+        # 2. Press A on NEW CAMPAIGN -> enters Battlefield with Cursor OAM[0], 12 Units OAM[1..12], & Segmented HP Bar in BG1!
+        tcpu.set_buttons(["A"])
+        tcpu.run_frames(2)
+        tcpu.set_buttons([])
+        tcpu.run_frames(2)
+        bar_hw = struct.unpack_from("<H", tcpu.vram, 0xF000 + (18 * 32 + 17) * 2)[0]
+        assert (bar_hw & 0x3FF) == FONT_INDEX["BAR_ON"], "Unit inspector must render segmented HP gauge bar (BAR_ON)!"
         ca0, ca1, _ = tcpu.oam_entry(0)
         assert (ca0 & 0x0200) == 0, "Advance Ops Cursor OAM[0] must be visible!"
         cx0 = ca1 & 0x1FF
         for ui in range(1, 13):
             ua0, _, _ = tcpu.oam_entry(ui)
             assert (ua0 & 0x0200) == 0, f"Advance Ops Unit OAM[{ui}] should be visible!"
-        # Move cursor RIGHT -> steps 16px on tactical grid!
+        # 3. Move cursor RIGHT -> steps 16px on tactical grid!
         tcpu.set_buttons(["RIGHT"])
         tcpu.run_frames(2)
         _, ca1_r, _ = tcpu.oam_entry(0)
         assert (ca1_r & 0x1FF) == cx0 + 16, f"Tactical cursor should move +16px, got {cx0} -> {ca1_r & 0x1FF}"
-        # Press START -> End Turn -> Autonomous Red AI Turn runs & advances DAY 1 -> DAY 2 + writes 'AW' to GBA SRAM!
+        # 4. Press START (Command Menu) -> A (END TURN) -> Autonomous Red AI Turn runs & saves Day 2 to GBA SRAM!
         tcpu.set_buttons([])
         tcpu.run_frames(1)
         tcpu.set_buttons(["START"])
         tcpu.run_frames(2)
         tcpu.set_buttons([])
-        tcpu.run_frames(90)  # Let Red AI think, move all 6 units, build, and pass to Day 2!
+        tcpu.run_frames(1)
+        tcpu.set_buttons(["A"])
+        tcpu.run_frames(2)
+        tcpu.set_buttons([])
+        tcpu.run_frames(90)
         assert tcpu.sram[0:2] == b"AW" and tcpu.sram[2] == 2, f"Red AI turn must finish & save Day 2 to SRAM, got {tcpu.sram[0:3]!r}"
-        # Also verify live 60fps KinoScript simulator renders Advance Ops cleanly!
+        # 5. Also verify live 60fps KinoScript simulator renders Title + Battle + Forecast cleanly!
         tsim = GamePlaytestEngine(tact)
-        tsim.step({"RIGHT"})
+        trgb_title = tsim.render_rgb()
+        assert trgb_title.shape == (160, 240, 3)
         tsim.step({"A"})
+        tsim.step({"RIGHT"})
         trgb = tsim.render_rgb()
         assert trgb.shape == (160, 240, 3)
 
@@ -760,6 +780,13 @@ def test_headless_studio_ui() -> None:
     for idx in range(5):
         win.stage_tabs.setCurrentIndex(idx)
         app.processEvents()
+    # Verify new Pro Pixel Art tools & Visual 9-Slice Menu Designer -> KinoScript export!
+    win.page_sprite._auto_outline()
+    win.page_sprite._nudge_frame(1, 0)
+    win.page_wiring.logic_tabs.setCurrentIndex(2)
+    app.processEvents()
+    win.page_wiring._export_menu_to_kinoscript()
+    assert "draw_window(" in win.page_wiring.ed_ks.toPlainText() and "draw_bar(" in win.page_wiring.ed_ks.toPlainText()
     win._apply_theme("Light")
     win._apply_theme("High Contrast")
     win._apply_theme("Dark")

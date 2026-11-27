@@ -34,6 +34,19 @@ def main() -> None:
     assert route_file_to_app("starbit.kpx", apps).app_id == "kinopixel"
     assert route_file_to_app("starbit.gba", apps).app_id == "kinopixel"
 
+    # Verify Single-Instance Guard blocks a second Hub instance and wakes the primary instance
+    from main import SingleInstanceGuard
+    g1 = SingleInstanceGuard("Local\\KinoSuite_Test_Mutex_v1", "Local\\KinoSuite_Test_Wake_v1")
+    g2 = SingleInstanceGuard("Local\\KinoSuite_Test_Mutex_v1", "Local\\KinoSuite_Test_Wake_v1")
+    assert g1.acquire(), "First instance must acquire single-instance lock!"
+    assert not g1.poll_wake_requested(), "Wake event should not be set yet"
+    assert not g2.acquire(), "Second instance must be blocked!"
+    if sys.platform == "win32":
+        assert g1.poll_wake_requested(), "Second instance must signal primary instance wake event!"
+    g1.release()
+    assert g2.acquire(), "After release, a new instance must be able to acquire lock!"
+    g2.release()
+
     app = QApplication.instance() or QApplication([])
     t0 = time.perf_counter()
     win = KinoSuiteHubWindow(ROOT)

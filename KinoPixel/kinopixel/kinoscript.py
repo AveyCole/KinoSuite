@@ -94,6 +94,9 @@ KS_BUILTINS: Dict[str, int] = {
     "draw_text": 3,
     "draw_num": 4,
     "draw_box": 4,
+    "draw_window": 4,
+    "draw_bar": 5,
+    "set_fade": 1,
     "clear_ui_rect": 4,
     "clear_ui": 0,
     "set_sprite": 7,
@@ -833,6 +836,16 @@ class KinoScriptArmCompiler:
                 asm.add_imm(SP, SP, 28)
                 return
 
+            if name == "draw_bar":
+                for a in args:
+                    self._emit_expr(asm, a)
+                    asm.push([R0])
+                # Stack: [SP+16]=tx, [SP+12]=ty, [SP+8]=w, [SP+4]=cur, [SP+0]=maxv
+                asm.mov_reg(R0, SP)
+                asm.bl("ks_rt_draw_bar")
+                asm.add_imm(SP, SP, 20)
+                return
+
             for a in args:
                 self._emit_expr(asm, a)
                 asm.push([R0])
@@ -901,6 +914,7 @@ class KinoScriptLiveRuntime:
         self.frame: int = 0
         self.rng_state: int = 0x12345678
         self.bgm_on: bool = True
+        self.fade_level: int = 0  # -16 (black) .. 0 (normal) .. +16 (white flash)
         self.error: str = ""
         self._ns: Dict[str, Any] = {}
         self._load_room(0)
@@ -947,6 +961,9 @@ class KinoScriptLiveRuntime:
             "draw_text": self._api_draw_text,
             "draw_num": self._api_draw_num,
             "draw_box": self._api_draw_box,
+            "draw_window": self._api_draw_window,
+            "draw_bar": self._api_draw_bar,
+            "set_fade": self._api_set_fade,
             "clear_ui_rect": self._api_clear_ui_rect,
             "clear_ui": self._api_clear_ui,
             "set_sprite": self._api_set_sprite,
@@ -1011,11 +1028,15 @@ class KinoScriptLiveRuntime:
         return 0
 
     def _api_draw_text(self, tx: int, ty: int, text: str) -> int:
+        from .gba_compiler import FONT_SOLID_OFFSET
         tx, ty = int(tx), int(ty)
         for i, ch in enumerate(str(text).upper()):
             cx = tx + i
             if 0 <= ty < 32 and 0 <= cx < 32:
-                self.ui_tiles[ty][cx] = (self._font_index.get(ch, 0), 15)
+                gid = self._font_index.get(ch, 0)
+                if self.ui_tiles[ty][cx][0] != 0:
+                    gid += FONT_SOLID_OFFSET
+                self.ui_tiles[ty][cx] = (gid, 15)
         return 0
 
     def _api_draw_num(self, tx: int, ty: int, val: int, digits: int) -> int:
@@ -1031,6 +1052,45 @@ class KinoScriptLiveRuntime:
             for xx in range(tx, tx + w):
                 if 0 <= yy < 32 and 0 <= xx < 32:
                     self.ui_tiles[yy][xx] = (box_id, 15)
+        return 0
+
+    def _api_draw_window(self, tx: int, ty: int, w: int, h: int) -> int:
+        tx, ty, w, h = int(tx), int(ty), int(w), int(h)
+        if w < 2 or h < 2:
+            return 0
+        self._api_draw_box(tx, ty, w, h)
+        fi = self._font_index
+        for xx in range(tx + 1, tx + w - 1):
+            if 0 <= xx < 32:
+                if 0 <= ty < 32: self.ui_tiles[ty][xx] = (fi["WIN_T"], 15)
+                if 0 <= ty + h - 1 < 32: self.ui_tiles[ty + h - 1][xx] = (fi["WIN_B"], 15)
+        for yy in range(ty + 1, ty + h - 1):
+            if 0 <= yy < 32:
+                if 0 <= tx < 32: self.ui_tiles[yy][tx] = (fi["WIN_L"], 15)
+                if 0 <= tx + w - 1 < 32: self.ui_tiles[yy][tx + w - 1] = (fi["WIN_R"], 15)
+        for px, py, k in ((tx, ty, "WIN_UL"), (tx + w - 1, ty, "WIN_UR"), (tx, ty + h - 1, "WIN_BL"), (tx + w - 1, ty + h - 1, "WIN_BR")):
+            if 0 <= py < 32 and 0 <= px < 32:
+                self.ui_tiles[py][px] = (fi[k], 15)
+        return 0
+
+    def _api_draw_bar(self, tx: int, ty: int, w: int, cur: int, maxv: int) -> int:
+        tx, ty, w = int(tx), int(ty), int(w)
+        if w < 1 or not (0 <= ty < 32):
+            return 0
+        maxv = max(1, int(maxv))
+        cur = max(0, int(cur))
+        filled = (cur * w) // maxv
+        fi = self._font_index
+        on_id = fi["BAR_LO"] if (filled * 3 <= w) else fi["BAR_ON"]
+        off_id = fi["BAR_OF"]
+        for i in range(w):
+            cx = tx + i
+            if 0 <= cx < 32:
+                self.ui_tiles[ty][cx] = (on_id if i < filled else off_id, 15)
+        return 0
+
+    def _api_set_fade(self, level: int) -> int:
+        self.fade_level = max(-16, min(16, int(level)))
         return 0
 
     def _api_clear_ui_rect(self, tx: int, ty: int, w: int, h: int) -> int:
@@ -1119,6 +1179,7 @@ def validate_kinoscript(source: str) -> Tuple[bool, str, int]:
             "ks_rt_get_tile", "ks_rt_get_tile_type", "ks_rt_set_tile",
             "ks_rt_set_ui_tile", "ks_rt_set_bg2_tile", "ks_rt_scroll_bg",
             "ks_rt_draw_text", "ks_rt_draw_num", "ks_rt_draw_box",
+            "ks_rt_draw_window", "ks_rt_draw_bar", "ks_rt_set_fade",
             "ks_rt_clear_ui_rect", "ks_rt_clear_ui", "ks_rt_set_sprite",
             "ks_rt_hide_sprite", "ks_rt_hide_all_sprites", "ks_rt_play_sfx",
             "ks_rt_play_dma", "ks_rt_bgm_enable", "ks_rt_sram_write",

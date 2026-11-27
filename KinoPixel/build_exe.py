@@ -42,7 +42,7 @@ def main() -> int:
         return 0
 
     excludes = [
-        "tkinter", "_tkinter", "matplotlib", "pandas", "cv2", "PIL", "scipy",
+        "tkinter", "_tkinter", "matplotlib", "pandas", "cv2", "scipy",
         "sympy", "onnxruntime", "reportlab", "pypdf", "folium", "branca",
         "beautifulsoup4", "bs4", "jinja2", "Jinja2", "requests", "urllib3",
         "PySide6.QtWebEngine", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
@@ -63,6 +63,7 @@ def main() -> int:
         "--collect-binaries", "_sounddevice_data",
         "--hidden-import", "sounddevice",
         "--hidden-import", "_sounddevice_data",
+        "--hidden-import", "PIL.Image",
         "--distpath", os.path.join(ROOT, "dist"),
         "--workpath", os.path.join(ROOT, "build"),
         "--specpath", ROOT,

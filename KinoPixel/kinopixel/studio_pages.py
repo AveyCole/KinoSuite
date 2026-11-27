@@ -144,10 +144,14 @@ class SpriteEditorPage(QWidget):
         sp_btns = QHBoxLayout()
         b_add_sp = QPushButton("+ Sprite")
         b_add_sp.clicked.connect(self._add_sprite)
-        b_dup_sp = QPushButton("Duplicate")
+        b_dup_sp = QPushButton("Dup")
         b_dup_sp.clicked.connect(self._dup_sprite)
+        b_imp_sp = QPushButton("Import PNG...")
+        b_imp_sp.setToolTip("Import a PNG sprite sheet or portrait with 15-color BGR555 palette extraction & frame slicing")
+        b_imp_sp.clicked.connect(self._import_png_sheet)
         sp_btns.addWidget(b_add_sp)
         sp_btns.addWidget(b_dup_sp)
+        sp_btns.addWidget(b_imp_sp)
         ll.addLayout(sp_btns)
 
         sz_row = QHBoxLayout()
@@ -247,6 +251,18 @@ class SpriteEditorPage(QWidget):
             b.clicked.connect(lambda _=False, t=tid: self._set_tool(t))
             self.tool_btns[tid] = b
             tl.addWidget(b)
+        for tid, lbl, tip in [
+            ("dither", "Dith", "Checkerboard Dither Shading Brush"),
+            ("shade", "Shad", "Palette Shade Brush (L-Click Darken / R-Click Lighten)"),
+        ]:
+            b = QToolButton()
+            b.setText(lbl)
+            b.setToolTip(tip)
+            b.setCheckable(True)
+            b.setFixedHeight(28)
+            b.clicked.connect(lambda _=False, t=tid: self._set_tool(t))
+            self.tool_btns[tid] = b
+            tl.addWidget(b)
         self.tool_btns["pencil"].setChecked(True)
 
         tl.addSpacing(8)
@@ -287,6 +303,20 @@ class SpriteEditorPage(QWidget):
             b.setFixedSize(30, 28)
             b.clicked.connect(fn)
             tl.addWidget(b)
+
+        b_out = QPushButton("Outline")
+        b_out.setToolTip("1-Click Auto-Outline sprite silhouette with darkest palette color")
+        b_out.setFixedHeight(26)
+        b_out.clicked.connect(self._auto_outline)
+        tl.addWidget(b_out)
+
+        for sym, dx, dy in [("←", -1, 0), ("→", 1, 0), ("↑", 0, -1), ("↓", 0, 1)]:
+            bn = QToolButton()
+            bn.setText(sym)
+            bn.setToolTip("Nudge Frame 1px")
+            bn.setFixedSize(22, 26)
+            bn.clicked.connect(lambda _=False, x=dx, y=dy: self._nudge_frame(x, y))
+            tl.addWidget(bn)
 
         b_clear = QPushButton("Clear")
         b_clear.setFixedHeight(26)
@@ -673,6 +703,114 @@ class SpriteEditorPage(QWidget):
         self._sync_canvas()
         self._refresh_thumbnails()
         self.projectModified.emit("Clear Frame")
+
+    def _auto_outline(self) -> None:
+        """Wrap non-transparent sprite pixels with a crisp 1px dark outline (classic GBA pixel-art polish!)."""
+        sp = self._cur_sprite()
+        if not sp or not self.project:
+            return
+        cols = self.project.get_palette_colors(sp.palette_index)
+        # Pick darkest non-zero palette index as outline color
+        from PySide6.QtGui import QColor
+        dark_idx = min(range(1, min(16, len(cols))), key=lambda i: QColor(cols[i]).lightness())
+        fr = sp.frames[self.frame_idx]
+        h, w = len(fr), len(fr[0])
+        to_mark = []
+        for y in range(h):
+            for x in range(w):
+                if fr[y][x] == 0:
+                    if any(0 <= y + dy < h and 0 <= x + dx < w and fr[y + dy][x + dx] > 0 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                        to_mark.append((x, y))
+        for x, y in to_mark:
+            fr[y][x] = dark_idx
+        self._sync_canvas()
+        self._refresh_thumbnails()
+        self.projectModified.emit("Auto-Outline Sprite")
+
+    def _nudge_frame(self, dx: int, dy: int) -> None:
+        sp = self._cur_sprite()
+        if not sp:
+            return
+        fr = sp.frames[self.frame_idx]
+        h, w = len(fr), len(fr[0])
+        out = empty_grid(w, h, 0)
+        for y in range(h):
+            for x in range(w):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h:
+                    out[ny][nx] = fr[y][x]
+        sp.frames[self.frame_idx] = out
+        self._sync_canvas()
+        self._refresh_thumbnails()
+        self.projectModified.emit("Nudge Frame")
+
+    def _import_png_sheet(self) -> None:
+        """Import a PNG/BMP/WebP sprite sheet or portrait with BGR555 15-color quantization & frame slicing."""
+        if not self.project:
+            return
+        fp, _ = QFileDialog.getOpenFileName(self, "Import Sprite Sheet / Portrait", "", "Images (*.png *.bmp *.webp *.jpg)")
+        if not fp:
+            return
+        try:
+            from PIL import Image
+            from .models import quantize_hex_bgr555
+            img = Image.open(fp).convert("RGBA")
+        except Exception as exc:
+            QMessageBox.warning(self, "Import Failed", str(exc))
+            return
+
+        sp = self._cur_sprite()
+        fw, fh = (sp.width, sp.height) if sp else (16, 16)
+        # Slice horizontal strip if image is wider than 1 frame, else resize portrait cleanly to (fw, fh)
+        if img.width >= fw * 2 and img.height <= fh * 2:
+            n_frames = max(1, min(16, img.width // fw))
+            slices = [img.crop((i * fw, 0, (i + 1) * fw, min(img.height, fh))).resize((fw, fh), Image.Resampling.NEAREST) for i in range(n_frames)]
+        else:
+            slices = [img.resize((fw, fh), Image.Resampling.NEAREST)]
+
+        # Optional 15-color BGR555 palette extraction into active palette slot
+        cols = self.project.get_palette_colors(sp.palette_index if sp else 0)
+        extract = QMessageBox.question(
+            self, "Hardware Palette Quantization",
+            f"Extract an optimal 15-color GBA BGR555 palette from '{os.path.basename(fp)}' into Palette Slot {sp.palette_index if sp else 0}?\n"
+            "(Choose 'No' to map onto your existing palette.)",
+        ) == QMessageBox.StandardButton.Yes
+        if extract:
+            rgb_q = img.convert("RGB").quantize(colors=15, method=Image.Quantize.MEDIANCUT)
+            raw_pal = rgb_q.getpalette()[:45]
+            new_pal = [cols[0]]
+            for i in range(0, len(raw_pal), 3):
+                hx = quantize_hex_bgr555(f"#{raw_pal[i]:02X}{raw_pal[i+1]:02X}{raw_pal[i+2]:02X}")
+                new_pal.append(hx)
+            while len(new_pal) < 16:
+                new_pal.append("#000000")
+            self.project.palettes[sp.palette_index if sp else 0] = new_pal
+            cols = new_pal
+
+        from .models import hex_to_rgb
+        pal_rgbs = [hex_to_rgb(c) for c in cols[:self.project.active_palette_size()]]
+        frames_out = []
+        for sl in slices:
+            px = sl.load()
+            grid = empty_grid(fw, fh, 0)
+            for y in range(fh):
+                for x in range(fw):
+                    r, g, b, a = px[x, y]
+                    if a < 128:
+                        grid[y][x] = 0
+                    else:
+                        grid[y][x] = min(
+                            range(1, len(pal_rgbs)),
+                            key=lambda i: (r - pal_rgbs[i][0]) ** 2 + (g - pal_rgbs[i][1]) ** 2 + (b - pal_rgbs[i][2]) ** 2,
+                        )
+            frames_out.append(grid)
+
+        if sp:
+            sp.frames = frames_out
+            sp.animations[0].frame_indices = list(range(min(4, len(frames_out))))
+            self.frame_idx = 0
+        self.refresh_all()
+        self.projectModified.emit(f"Import PNG ({len(frames_out)}f · {fw}×{fh})")
 
     def _toggle_anim_play(self, checked: bool) -> None:
         self._anim_playing = not checked
@@ -1206,11 +1344,14 @@ class ButtonWiringPage(QWidget):
             "  set_tile(tx, ty, tile_id)\n"
             "  set_ui_tile(tx, ty, tile_id, pal)\n"
             "  scroll_bg(layer, x, y)\n"
+            "  draw_window(tx, ty, w, h)  # 9-Slice GBA Window!\n"
             "  draw_box(tx, ty, w, h)\n"
-            "  draw_text(tx, ty, 'TEXT')\n"
+            "  draw_text(tx, ty, 'TEXT')  # Auto solid-backed in windows!\n"
             "  draw_num(tx, ty, val, digits)\n"
+            "  draw_bar(tx, ty, w, cur, maxv)  # Segmented HP/Gauge!\n"
             "  clear_ui_rect(tx, ty, w, h), clear_ui()\n\n"
-            "AUDIO, SRAM & MATH:\n"
+            "HARDWARE EFFECTS, AUDIO, SRAM & MATH:\n"
+            "  set_fade(-16..+16)  # Black fade / White hit flash!\n"
             "  play_sfx(idx), play_dma(), bgm_enable(1)\n"
             "  sram_write(addr, val), sram_read(addr)\n"
             "  frame_count(), rand(), abs(x), min(a,b), max(a,b), clamp(x,lo,hi)\n"
@@ -1218,8 +1359,64 @@ class ButtonWiringPage(QWidget):
         rl.addWidget(ref)
         kroot.addWidget(ref_box, 2)
 
-        self.logic_tabs.addTab(ks_tab, "KinoScript Native ARM7TDMI Studio (Full Custom Engine)")
+        self.logic_tabs.addTab(ks_tab, "KinoScript Native ARM7TDMI Studio")
+
+        # Sub-Tab 3: Visual UI & Menu Screen Designer (9-Slice Windows, Gauges, Portraits -> KinoScript!)
+        ui_tab = QWidget()
+        ul = QHBoxLayout(ui_tab)
+        ul.setContentsMargins(6, 6, 6, 6)
+        ul.setSpacing(10)
+
+        uleft = QWidget()
+        uleft.setObjectName("SidePane")
+        uleft.setFixedWidth(290)
+        ull = QVBoxLayout(uleft)
+        ull.setContentsMargins(8, 8, 8, 8)
+        ull.setSpacing(6)
+
+        uh = QLabel("VISUAL GBA MENU & UI DESIGNER")
+        uh.setObjectName("SectionHeader")
+        ull.addWidget(uh)
+
+        self._menu_items: List[Dict] = [
+            {"kind": "window", "x": 3, "y": 2, "w": 24, "h": 14},
+            {"kind": "text", "x": 8, "y": 4, "text": "TACTICAL COMMAND"},
+            {"kind": "text", "x": 7, "y": 7, "text": "> CAMPAIGN BATTLE"},
+            {"kind": "text", "x": 7, "y": 9, "text": "  CONTINUE (SRAM)"},
+            {"kind": "text", "x": 7, "y": 11, "text": "  UNIT INTEL"},
+            {"kind": "bar", "x": 7, "y": 13, "w": 14, "cur": 8, "max": 10},
+        ]
+        self.lst_ui_els = QListWidget()
+        self.lst_ui_els.currentRowChanged.connect(self._render_menu_preview)
+        ull.addWidget(self.lst_ui_els, 1)
+
+        ub1 = QHBoxLayout()
+        for lbl, knd in [("+ Window", "window"), ("+ Text", "text"), ("+ Gauge", "bar")]:
+            b = QPushButton(lbl)
+            b.clicked.connect(lambda _=False, k=knd: self._add_menu_el(k))
+            ub1.addWidget(b)
+        ull.addLayout(ub1)
+
+        ub2 = QHBoxLayout()
+        b_del_el = QPushButton("Remove Selected")
+        b_del_el.setObjectName("DangerButton")
+        b_del_el.clicked.connect(self._del_menu_el)
+        b_gen_el = QPushButton("Send to KinoScript →")
+        b_gen_el.setObjectName("PrimaryButton")
+        b_gen_el.clicked.connect(self._export_menu_to_kinoscript)
+        ub2.addWidget(b_del_el)
+        ub2.addWidget(b_gen_el)
+        ull.addLayout(ub2)
+        ul.addWidget(uleft)
+
+        self.lbl_menu_preview = QLabel()
+        self.lbl_menu_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_menu_preview.setStyleSheet("background-color:#0B0E14; border:1px solid #2A3242; border-radius:6px;")
+        ul.addWidget(self.lbl_menu_preview, 1)
+
+        self.logic_tabs.addTab(ui_tab, "Visual UI & Menu Designer (9-Slice GBA)")
         outer.addWidget(self.logic_tabs, 1)
+        self._refresh_menu_designer()
 
     def set_project(self, proj: KinoPixelProject) -> None:
         self.project = proj
@@ -1326,6 +1523,146 @@ class ButtonWiringPage(QWidget):
         self.cb_ks_enable.setChecked(True)
         self._validate_ks(silent=True)
         self.projectModified.emit("Insert KinoScript Starter")
+
+    # --- Visual UI & Menu Screen Designer Helpers ---
+    def _refresh_menu_designer(self) -> None:
+        self.lst_ui_els.blockSignals(True)
+        self.lst_ui_els.clear()
+        for el in self._menu_items:
+            k = el["kind"]
+            if k == "window":
+                self.lst_ui_els.addItem(f"Window ({el['x']},{el['y']}) {el['w']}×{el['h']}")
+            elif k == "text":
+                self.lst_ui_els.addItem(f"Text ({el['x']},{el['y']}) \"{el['text']}\"")
+            elif k == "bar":
+                self.lst_ui_els.addItem(f"Gauge ({el['x']},{el['y']}) {el['cur']}/{el['max']} w={el['w']}")
+        self.lst_ui_els.blockSignals(False)
+        self._render_menu_preview()
+
+    def _add_menu_el(self, kind: str) -> None:
+        if kind == "window":
+            txt, ok = QInputDialog.getText(self, "Add 9-Slice Window", "x, y, width, height (30x20 grid):", text="4, 4, 20, 8")
+            if ok:
+                try:
+                    x, y, w, h = [int(v.strip()) for v in txt.split(",")]
+                    self._menu_items.append({"kind": "window", "x": x, "y": y, "w": w, "h": h})
+                except Exception:
+                    pass
+        elif kind == "text":
+            txt, ok = QInputDialog.getText(self, "Add Text Label", "x, y, LABEL TEXT:", text="6, 6, NEW OPTION")
+            if ok and "," in txt:
+                parts = txt.split(",", 2)
+                try:
+                    self._menu_items.append({"kind": "text", "x": int(parts[0]), "y": int(parts[1]), "text": parts[2].strip().upper()})
+                except Exception:
+                    pass
+        elif kind == "bar":
+            txt, ok = QInputDialog.getText(self, "Add Gauge Bar", "x, y, width, cur, max:", text="6, 8, 10, 7, 10")
+            if ok:
+                try:
+                    x, y, w, cur, mx = [int(v.strip()) for v in txt.split(",")]
+                    self._menu_items.append({"kind": "bar", "x": x, "y": y, "w": w, "cur": cur, "max": mx})
+                except Exception:
+                    pass
+        self._refresh_menu_designer()
+
+    def _del_menu_el(self) -> None:
+        r = self.lst_ui_els.currentRow()
+        if 0 <= r < len(self._menu_items):
+            self._menu_items.pop(r)
+            self._refresh_menu_designer()
+
+    def _render_menu_preview(self) -> None:
+        import numpy as np
+        from PySide6.QtGui import QImage, QPixmap
+        from .gba_compiler import FONT_INDEX, FONT_ORDER, FONT_SOLID_OFFSET, _hud_glyph_grid
+        from .models import hex_to_rgb
+        fb = np.zeros((160, 240, 3), dtype=np.uint8)
+        fb[:, :] = (16, 20, 36)
+        ui = [[0 for _ in range(30)] for _ in range(20)]
+        for el in self._menu_items:
+            k = el["kind"]
+            if k == "window":
+                tx, ty, w, h = el["x"], el["y"], el["w"], el["h"]
+                for yy in range(ty, ty + h):
+                    for xx in range(tx, tx + w):
+                        if 0 <= yy < 20 and 0 <= xx < 30:
+                            ui[yy][xx] = FONT_INDEX["BOX"]
+                for xx in range(tx + 1, tx + w - 1):
+                    if 0 <= xx < 30:
+                        if 0 <= ty < 20: ui[ty][xx] = FONT_INDEX["WIN_T"]
+                        if 0 <= ty + h - 1 < 20: ui[ty + h - 1][xx] = FONT_INDEX["WIN_B"]
+                for yy in range(ty + 1, ty + h - 1):
+                    if 0 <= yy < 20:
+                        if 0 <= tx < 30: ui[yy][tx] = FONT_INDEX["WIN_L"]
+                        if 0 <= tx + w - 1 < 30: ui[yy][tx + w - 1] = FONT_INDEX["WIN_R"]
+                for px, py, gk in ((tx, ty, "WIN_UL"), (tx + w - 1, ty, "WIN_UR"), (tx, ty + h - 1, "WIN_BL"), (tx + w - 1, ty + h - 1, "WIN_BR")):
+                    if 0 <= py < 20 and 0 <= px < 30:
+                        ui[py][px] = FONT_INDEX[gk]
+            elif k == "text":
+                tx, ty = el["x"], el["y"]
+                for i, ch in enumerate(el["text"].upper()):
+                    if 0 <= ty < 20 and 0 <= tx + i < 30:
+                        gid = FONT_INDEX.get(ch, 0)
+                        if ui[ty][tx + i] != 0:
+                            gid += FONT_SOLID_OFFSET
+                        ui[ty][tx + i] = gid
+            elif k == "bar":
+                tx, ty, w, cur, mx = el["x"], el["y"], el["w"], el["cur"], max(1, el["max"])
+                filled = (cur * w) // mx
+                on_id = FONT_INDEX["BAR_LO"] if (filled * 3 <= w) else FONT_INDEX["BAR_ON"]
+                for i in range(w):
+                    if 0 <= ty < 20 and 0 <= tx + i < 30:
+                        ui[ty][tx + i] = on_id if i < filled else FONT_INDEX["BAR_OF"]
+        hud_pal = np.array([
+            (0, 0, 0), hex_to_rgb("#0D1528"), hex_to_rgb("#F8FAFC"), hex_to_rgb("#FDE047"),
+            hex_to_rgb("#F43F5E"), hex_to_rgb("#060A14"), hex_to_rgb("#34D399"),
+            hex_to_rgb("#38BDF8"), hex_to_rgb("#1E3A5F"), hex_to_rgb("#334155"),
+        ], dtype=np.uint8)
+        for ty in range(20):
+            for tx in range(30):
+                tid = ui[ty][tx]
+                if tid <= 0:
+                    continue
+                solid_bg = tid >= FONT_SOLID_OFFSET
+                bid = tid - FONT_SOLID_OFFSET if solid_bg else tid
+                if bid >= len(FONT_ORDER):
+                    continue
+                g = _hud_glyph_grid(FONT_ORDER[bid], solid_bg=solid_bg)
+                for py in range(8):
+                    for px in range(8):
+                        if g[py][px] > 0:
+                            fb[ty * 8 + py, tx * 8 + px] = hud_pal[g[py][px]]
+        img = QImage(fb.data, 240, 160, 240 * 3, QImage.Format.Format_RGB888).copy()
+        pm = QPixmap.fromImage(img).scaled(480, 320, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+        self.lbl_menu_preview.setPixmap(pm)
+
+    def _export_menu_to_kinoscript(self) -> None:
+        if not self.project:
+            return
+        lines = ["\ndef draw_designed_menu():", "    clear_ui()"]
+        for el in self._menu_items:
+            k = el["kind"]
+            if k == "window":
+                lines.append(f"    draw_window({el['x']}, {el['y']}, {el['w']}, {el['h']})")
+            elif k == "text":
+                safe = el["text"].replace('"', "'")
+                lines.append(f'    draw_text({el["x"]}, {el["y"]}, "{safe}")')
+            elif k == "bar":
+                lines.append(f"    draw_bar({el['x']}, {el['y']}, {el['w']}, {el['cur']}, {el['max']})")
+        snippet = "\n".join(lines) + "\n"
+        cur = self.ed_ks.toPlainText()
+        if "def on_frame" not in cur:
+            cur = snippet + "\ndef on_init():\n    draw_designed_menu()\n\ndef on_frame():\n    pass\n"
+        else:
+            cur = cur + snippet
+        self.ed_ks.setPlainText(cur)
+        self.project.script_code = cur
+        self.project.script_enabled = True
+        self.cb_ks_enable.setChecked(True)
+        self.logic_tabs.setCurrentIndex(1)
+        self._validate_ks(silent=True)
+        self.projectModified.emit("Export Visual Menu to KinoScript")
 
     def _on_start_var0_changed(self, v: int) -> None:
         if self.project:

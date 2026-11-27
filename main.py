@@ -10,7 +10,7 @@ import ctypes
 import os
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDir, QLockFile, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
@@ -20,6 +20,115 @@ from kinosuite.registry import SuiteConfig, discover_suite_apps, launch_kino_app
 from kinosuite.theme import KINOSUITE_HUB_DARK
 
 APP_USER_MODEL_ID = "KinoSuite.Hub.Desktop.1"
+SINGLE_INSTANCE_MUTEX = "Local\\KinoSuite_Hub_SingleInstance_Mutex_v1"
+SINGLE_INSTANCE_WAKE_EVENT = "Local\\KinoSuite_Hub_WakeEvent_v1"
+ERROR_ALREADY_EXISTS = 183
+
+
+class SingleInstanceGuard:
+    """Guarantees only one KinoSuite Hub instance runs at a time and focuses it on re-launch."""
+
+    def __init__(
+        self,
+        mutex_name: str = SINGLE_INSTANCE_MUTEX,
+        event_name: str = SINGLE_INSTANCE_WAKE_EVENT,
+    ) -> None:
+        self.mutex_name = mutex_name
+        self.event_name = event_name
+        self._mutex = None
+        self._wake_event = None
+        self._lock_file: QLockFile | None = None
+        self._k32 = None
+        self.is_primary = False
+
+    def acquire(self) -> bool:
+        if sys.platform == "win32":
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+            k32.CreateMutexW.restype = ctypes.c_void_p
+            k32.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool, ctypes.c_wchar_p]
+            k32.CreateEventW.restype = ctypes.c_void_p
+            k32.SetEvent.argtypes = [ctypes.c_void_p]
+            k32.SetEvent.restype = ctypes.c_bool
+            k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            k32.WaitForSingleObject.restype = ctypes.c_uint32
+            k32.CloseHandle.argtypes = [ctypes.c_void_p]
+            k32.CloseHandle.restype = ctypes.c_bool
+            self._k32 = k32
+
+            ctypes.set_last_error(0)
+            h_mutex = k32.CreateMutexW(None, False, self.mutex_name)
+            err = ctypes.get_last_error()
+            h_event = k32.CreateEventW(None, False, False, self.event_name)
+            if not h_mutex:
+                if h_event:
+                    k32.CloseHandle(h_event)
+                return True  # Fail-open only if OS call unexpectedly fails
+
+            if err == ERROR_ALREADY_EXISTS:
+                # Signal the running primary instance to restore & come to foreground
+                try:
+                    ctypes.windll.user32.AllowSetForegroundWindow(0xFFFFFFFF)
+                except Exception:
+                    pass
+                if h_event:
+                    k32.SetEvent(h_event)
+                    k32.CloseHandle(h_event)
+                k32.CloseHandle(h_mutex)
+                self.is_primary = False
+                return False
+
+            self._mutex = h_mutex
+            self._wake_event = h_event
+            self.is_primary = True
+            return True
+
+        lock_path = os.path.join(QDir.tempPath(), f"{self.mutex_name.replace(chr(92), '_')}.lock")
+        lf = QLockFile(lock_path)
+        lf.setStaleLockTime(0)
+        if not lf.tryLock(0):
+            self.is_primary = False
+            return False
+        self._lock_file = lf
+        self.is_primary = True
+        return True
+
+    def poll_wake_requested(self) -> bool:
+        if sys.platform == "win32" and self._k32 and self._wake_event:
+            return self._k32.WaitForSingleObject(self._wake_event, 0) == 0
+        return False
+
+    def release(self) -> None:
+        if sys.platform == "win32" and self._k32:
+            if self._wake_event:
+                self._k32.CloseHandle(self._wake_event)
+                self._wake_event = None
+            if self._mutex:
+                self._k32.CloseHandle(self._mutex)
+                self._mutex = None
+        if self._lock_file is not None:
+            self._lock_file.unlock()
+            self._lock_file = None
+        self.is_primary = False
+
+
+def _bring_window_to_front(win: KinoSuiteHubWindow) -> None:
+    was_minimized = win.isMinimized()
+    if was_minimized:
+        win.showNormal()
+    else:
+        win.show()
+    win.setWindowState((win.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
+    win.raise_()
+    win.activateWindow()
+    if sys.platform == "win32":
+        try:
+            u32 = ctypes.windll.user32
+            hwnd = ctypes.c_void_p(int(win.winId()))
+            u32.ShowWindow(hwnd, 9 if was_minimized else 5)  # SW_RESTORE if minimized, else SW_SHOW
+            u32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
 
 
 def _set_windows_app_id() -> None:
@@ -87,6 +196,11 @@ def main() -> int:
         if routed_any:
             return 0
 
+    # Enforce single KinoSuite Hub instance; if already open, wake & focus it and exit cleanly
+    instance_guard = SingleInstanceGuard()
+    if not instance_guard.acquire():
+        return 0
+
     _set_windows_app_id()
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
@@ -101,7 +215,17 @@ def main() -> int:
     win.setWindowIcon(icon)
     win.show()
     win.apply_native_taskbar_icon()
-    return app.exec()
+
+    wake_timer = QTimer(win)
+    wake_timer.setInterval(150)
+    wake_timer.timeout.connect(lambda: _bring_window_to_front(win) if instance_guard.poll_wake_requested() else None)
+    wake_timer.start()
+
+    try:
+        return app.exec()
+    finally:
+        wake_timer.stop()
+        instance_guard.release()
 
 
 if __name__ == "__main__":

@@ -163,15 +163,41 @@ _FONT_BITMAPS: Dict[str, List[str]] = {
     "HEART": ["........", ".##.##..", "#######.", "#######.", ".#####..", "..###...", "...#....", "........"],
     "COIN": ["..###...", ".#####..", "##.#.##.", "##.#.##.", "##.#.##.", ".#####..", "..###...", "........"],
     "BEZEL": ["########", "########", "########", "########", "########", "########", "########", "########"],
-    "BOX": ["########", "########", "########", "########", "########", "########", "########", "########"],
+    "BOX": ["BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB"],
     "BAR": ["........", "########", "########", "########", "########", "########", "........", "........"],
+    # Commercial GBA UI Punctuation & 9-Slice Beveled Window Frame Tiles!
+    ">": [".Y......", ".YY.....", ".YYY....", ".YYYY...", ".YYY....", ".YY.....", ".Y......", "........"],
+    "*": ["...Y....", ".Y.Y.Y..", "..YYY...", ".YYYYY..", "..YYY...", ".Y.Y.Y..", "...Y....", "........"],
+    "%": [".##...#.", ".##..#..", "....#...", "...#....", "..#.....", ".#...##.", "#....##.", "........"],
+    "/": [".....##.", "....##..", "...##...", "..##....", ".##.....", "##......", "........", "........"],
+    "+": ["........", "...##...", "...##...", ".######.", "...##...", "...##...", "........", "........"],
+    "(": ["...##...", "..##....", ".##.....", ".##.....", ".##.....", "..##....", "...##...", "........"],
+    ")": ["..##....", "...##...", "....##..", "....##..", "....##..", "...##...", "..##....", "........"],
+    "?": [".#####..", "##...##.", "....##..", "...##...", "...##...", "........", "...##...", "........"],
+    "WIN_UL": ["..CCCCCC", ".CWWWWWW", "CWSSSSSS", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB"],
+    "WIN_T":  ["CCCCCCCC", "WWWWWWWW", "SSSSSSSS", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB"],
+    "WIN_UR": ["CCCCCC..", "WWWWWWC.", "SSSSSSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC"],
+    "WIN_L":  ["CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB"],
+    "WIN_R":  ["BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC"],
+    "WIN_BL": ["CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSBBBBB", "CWSSSSSS", ".CSSSSCC", "..CCCCCC"],
+    "WIN_B":  ["BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "BBBBBBBB", "SSSSSSSS", "CCCCCCCC", "KKKKKKKK"],
+    "WIN_BR": ["BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "BBBBBSWC", "SSSSSSWC", "CCSSSSCK", "CCCCCCKK"],
+    "BAR_ON": ["BBBBBBBB", "BWWWWWWB", "BMMMMMMB", "BMMMMMMB", "BMMMMMMB", "BSSSSSSB", "BBBBBBBB", "BBBBBBBB"],
+    "BAR_LO": ["BBBBBBBB", "BWWWWWWB", "BRRRRRRB", "BRRRRRRB", "BRRRRRRB", "BSSSSSSB", "BBBBBBBB", "BBBBBBBB"],
+    "BAR_OF": ["BBBBBBBB", "BGGGGGG.", "BGGGGGGB", "BGGGGGGB", "BGGGGGGB", "BGGGGGG.", "BBBBBBBB", "BBBBBBBB"],
 }
 
 FONT_ORDER = (
     [" "] + [str(d) for d in range(10)] + [chr(c) for c in range(ord("A"), ord("Z") + 1)]
-    + [":", "!", ".", "-", "HEART", "COIN", "BEZEL", "BOX", "BAR"]
+    + [
+        ":", "!", ".", "-", "HEART", "COIN", "BEZEL", "BOX", "BAR",
+        ">", "*", "%", "/", "+", "(", ")", "?",
+        "WIN_UL", "WIN_T", "WIN_UR", "WIN_L", "WIN_R", "WIN_BL", "WIN_B", "WIN_BR",
+        "BAR_ON", "BAR_LO", "BAR_OF",
+    ]
 )
 FONT_INDEX: Dict[str, int] = {ch: i for i, ch in enumerate(FONT_ORDER)}
+FONT_SOLID_OFFSET = len(FONT_ORDER)  # Second bank: identical glyphs backed by Window Navy (color 1) + drop shadow!
 
 
 def _pack_tile_4bpp(grid_8x8: List[List[int]]) -> bytes:
@@ -213,23 +239,50 @@ def _oam_shape_size_flags(w: int, h: int) -> Tuple[int, int]:
     return (0x0000, 0x4000)      # Square shape (0), size 1 -> 16x16
 
 
+_HUD_CHAR_MAP = {
+    ".": 0, "B": 1, "W": 2, "Y": 3, "R": 4, "K": 5, "M": 6, "C": 7, "S": 8, "G": 9,
+}
+
+
+def _hud_glyph_grid(key: str, solid_bg: bool = False) -> List[List[int]]:
+    bmp = _FONT_BITMAPS[key]
+    color_idx = 2
+    if key == "HEART":
+        color_idx = 4
+    elif key == "COIN":
+        color_idx = 3
+    elif key == "BEZEL":
+        color_idx = 5
+    elif key == "BOX":
+        color_idx = 1
+    elif key == "BAR":
+        color_idx = 6
+    grid = [
+        [color_idx if ch == "#" else _HUD_CHAR_MAP.get(ch, 0) for ch in row]
+        for row in bmp
+    ]
+    if solid_bg:
+        # Back transparent pixels with Deep Navy (1) + crisp 1px drop shadow (5) below/right of foreground!
+        out = [[1 for _ in range(8)] for _ in range(8)]
+        for y in range(8):
+            for x in range(8):
+                if grid[y][x] > 1:
+                    if y + 1 < 8 and x + 1 < 8 and grid[y + 1][x + 1] == 0:
+                        out[y + 1][x + 1] = 5
+        for y in range(8):
+            for x in range(8):
+                if grid[y][x] > 0:
+                    out[y][x] = grid[y][x]
+        return out
+    return grid
+
+
 def _build_hud_font_tiles() -> bytes:
     out = bytearray()
     for key in FONT_ORDER:
-        bmp = _FONT_BITMAPS[key]
-        color_idx = 2
-        if key == "HEART":
-            color_idx = 4
-        elif key == "COIN":
-            color_idx = 3
-        elif key == "BEZEL":
-            color_idx = 5
-        elif key == "BOX":
-            color_idx = 1
-        elif key == "BAR":
-            color_idx = 6
-        grid = [[color_idx if ch == "#" else 0 for ch in row] for row in bmp]
-        out.extend(_pack_tile_4bpp(grid))
+        out.extend(_pack_tile_4bpp(_hud_glyph_grid(key, solid_bg=False)))
+    for key in FONT_ORDER:
+        out.extend(_pack_tile_4bpp(_hud_glyph_grid(key, solid_bg=True)))
     return bytes(out)
 
 
@@ -428,14 +481,17 @@ def compile_gba_rom(project: KinoPixelProject, output_path: str) -> BuildReport:
             bg_pal[pi * 16 + ci] = val
             obj_pal[pi * 16 + ci] = val
     bg_pal[0] = hex_to_bgr555(project.bg_color_hex)
-    # HUD Palette Slot 15
+    # HUD Palette Slot 15 (Commercial GBA 9-Slice Window & Text Theme!)
     bg_pal[240 + 0] = 0
-    bg_pal[240 + 1] = hex_to_bgr555("#0D1322")  # Dialogue/Minimap Box dark backdrop
-    bg_pal[240 + 2] = hex_to_bgr555("#F8FAFC")  # Crisp white text
-    bg_pal[240 + 3] = hex_to_bgr555("#FDE047")  # Gold coin/visited room
-    bg_pal[240 + 4] = hex_to_bgr555("#F43F5E")  # Crimson heart
-    bg_pal[240 + 5] = hex_to_bgr555("#161A26")  # GB/GBC Bezel
-    bg_pal[240 + 6] = hex_to_bgr555("#34D399")  # Boss / Current Minimap Room mint
+    bg_pal[240 + 1] = hex_to_bgr555("#0D1528")  # Deep Navy Window Interior
+    bg_pal[240 + 2] = hex_to_bgr555("#F8FAFC")  # Crisp White Text / Specular
+    bg_pal[240 + 3] = hex_to_bgr555("#FDE047")  # Gold Accent / Cursor Arrow / Star
+    bg_pal[240 + 4] = hex_to_bgr555("#F43F5E")  # Crimson Heart / Low HP
+    bg_pal[240 + 5] = hex_to_bgr555("#060A14")  # Bezel / Drop Shadow
+    bg_pal[240 + 6] = hex_to_bgr555("#34D399")  # Mint Gauge Fill
+    bg_pal[240 + 7] = hex_to_bgr555("#38BDF8")  # Sky Cyan 9-Slice Outer Border
+    bg_pal[240 + 8] = hex_to_bgr555("#1E3A5F")  # Steel Blue Inner Window Bevel
+    bg_pal[240 + 9] = hex_to_bgr555("#334155")  # Empty Gauge Track
 
     bg_tiles_bytes = bytearray()
     tile_types = bytearray(256)
@@ -3773,7 +3829,7 @@ def _emit_kinoscript_runtime(asm: ArmAssembler, num_sprites: int) -> None:
     asm.bx(LR)
     asm.pool()
 
-    # --- BG1 Text, Numbers & UI Boxes ---
+    # --- BG1 Text, Numbers, 9-Slice Commercial Windows, Gauges & Hardware Fades ---
     asm.label("ks_rt_draw_text")
     asm.and_imm(R0, R0, 31)
     asm.and_imm(R1, R1, 31)
@@ -3784,6 +3840,12 @@ def _emit_kinoscript_runtime(asm: ArmAssembler, num_sprites: int) -> None:
     asm.ldrb(R12, R2, 0)
     asm.cmp_imm(R12, 0xFF)
     asm.b("ksdt_done", "EQ")
+    # If tile already at (tx, ty) is inside a window (non-zero!), auto-use solid-backed font bank (+FONT_SOLID_OFFSET)!
+    asm.ldrh(R0, R3, 0)
+    asm.ldr_lit(R1, 0x3FF)
+    asm.and_reg(R0, R0, R1)
+    asm.cmp_imm(R0, 0)
+    asm.add_imm(R12, R12, FONT_SOLID_OFFSET, cond="NE")
     asm.orr_imm(R12, R12, 0xF000)
     asm.strh(R12, R3, 0)
     asm.add_imm(R2, R2, 1)
@@ -3805,18 +3867,23 @@ def _emit_kinoscript_runtime(asm: ArmAssembler, num_sprites: int) -> None:
     asm.and_imm(R0, R0, 31)
     asm.and_imm(R1, R1, 31)
     asm.add_reg(R0, R0, R3)
-    asm.sub_imm(R0, R0, 1)  # rightmost col
+    asm.sub_imm(R0, R0, 1)
     asm.ldr_lit(R4, 0x0600F000)
     asm.add_reg(R4, R4, R1, "LSL", 6)
     asm.add_reg(R4, R4, R0, "LSL", 1)
-    asm.mov_reg(R5, R2)     # remaining val
-    asm.mov_reg(R6, R3)     # remaining digits
+    asm.mov_reg(R5, R2)
+    asm.mov_reg(R6, R3)
     asm.label("ksdn_lp")
     asm.mov_reg(R0, R5)
     asm.mov_imm(R1, 10)
     asm.bl("ks_rt_divmod")
     asm.mov_reg(R5, R0)
     asm.add_imm(R1, R1, FONT_INDEX["0"])
+    asm.ldrh(R0, R4, 0)
+    asm.ldr_lit(R7, 0x3FF)
+    asm.and_reg(R0, R0, R7)
+    asm.cmp_imm(R0, 0)
+    asm.add_imm(R1, R1, FONT_SOLID_OFFSET, cond="NE")
     asm.orr_imm(R1, R1, 0xF000)
     asm.strh(R1, R4, 0)
     asm.sub_imm(R4, R4, 2)
@@ -3824,6 +3891,163 @@ def _emit_kinoscript_runtime(asm: ArmAssembler, num_sprites: int) -> None:
     asm.b("ksdn_lp", "NE")
     asm.mov_imm(R0, 0)
     asm.pop([R4, R5, R6, R7, PC])
+
+    # ks_rt_draw_window(R0=tx, R1=ty, R2=w, R3=h) — 9-Slice Beveled Commercial GBA Window!
+    asm.label("ks_rt_draw_window")
+    asm.push([R4, R5, R6, R7, LR])
+    asm.cmp_imm(R2, 2)
+    asm.b("ksdw_done", "LT")
+    asm.cmp_imm(R3, 2)
+    asm.b("ksdw_done", "LT")
+    asm.mov_reg(R4, R0)  # tx
+    asm.mov_reg(R5, R1)  # ty
+    asm.mov_reg(R6, R2)  # w
+    asm.mov_reg(R7, R3)  # h
+    # Fill interior first with BOX
+    asm.bl("ks_rt_draw_box")
+    # Top & Bottom edges (cols tx+1 .. tx+w-2)
+    asm.mov_imm(R2, 1)
+    asm.sub_imm(R3, R6, 1)
+    asm.label("ksdw_h")
+    asm.cmp_reg(R2, R3)
+    asm.b("ksdw_v_init", "GE")
+    asm.add_reg(R0, R4, R2)
+    asm.and_imm(R0, R0, 31)
+    asm.ldr_lit(R12, 0x0600F000)
+    asm.add_reg(R12, R12, R5, "LSL", 6)
+    asm.add_reg(R12, R12, R0, "LSL", 1)
+    asm.ldr_lit(R1, (15 << 12) | FONT_INDEX["WIN_T"])
+    asm.strh(R1, R12, 0)
+    asm.add_reg(R1, R5, R7)
+    asm.sub_imm(R1, R1, 1)
+    asm.and_imm(R1, R1, 31)
+    asm.ldr_lit(R12, 0x0600F000)
+    asm.add_reg(R12, R12, R1, "LSL", 6)
+    asm.add_reg(R12, R12, R0, "LSL", 1)
+    asm.ldr_lit(R1, (15 << 12) | FONT_INDEX["WIN_B"])
+    asm.strh(R1, R12, 0)
+    asm.add_imm(R2, R2, 1)
+    asm.b("ksdw_h")
+    # Left & Right edges (rows ty+1 .. ty+h-2)
+    asm.label("ksdw_v_init")
+    asm.mov_imm(R2, 1)
+    asm.sub_imm(R3, R7, 1)
+    asm.label("ksdw_v")
+    asm.cmp_reg(R2, R3)
+    asm.b("ksdw_corners", "GE")
+    asm.add_reg(R1, R5, R2)
+    asm.and_imm(R1, R1, 31)
+    asm.ldr_lit(R12, 0x0600F000)
+    asm.add_reg(R12, R12, R1, "LSL", 6)
+    asm.and_imm(R0, R4, 31)
+    asm.ldr_lit(R1, (15 << 12) | FONT_INDEX["WIN_L"])
+    asm.mov_reg(R0, R0, "LSL", 1)
+    asm.strh_reg(R1, R12, R0)
+    asm.add_reg(R0, R4, R6)
+    asm.sub_imm(R0, R0, 1)
+    asm.and_imm(R0, R0, 31)
+    asm.mov_reg(R0, R0, "LSL", 1)
+    asm.ldr_lit(R1, (15 << 12) | FONT_INDEX["WIN_R"])
+    asm.strh_reg(R1, R12, R0)
+    asm.add_imm(R2, R2, 1)
+    asm.b("ksdw_v")
+    # 4 Corners
+    asm.label("ksdw_corners")
+    for is_r, is_b, gkey in ((False, False, "WIN_UL"), (True, False, "WIN_UR"), (False, True, "WIN_BL"), (True, True, "WIN_BR")):
+        asm.mov_reg(R0, R4)
+        if is_r:
+            asm.add_reg(R0, R0, R6)
+            asm.sub_imm(R0, R0, 1)
+        asm.and_imm(R0, R0, 31)
+        asm.mov_reg(R1, R5)
+        if is_b:
+            asm.add_reg(R1, R1, R7)
+            asm.sub_imm(R1, R1, 1)
+        asm.and_imm(R1, R1, 31)
+        asm.ldr_lit(R12, 0x0600F000)
+        asm.add_reg(R12, R12, R1, "LSL", 6)
+        asm.add_reg(R12, R12, R0, "LSL", 1)
+        asm.ldr_lit(R2, (15 << 12) | FONT_INDEX[gkey])
+        asm.strh(R2, R12, 0)
+    asm.label("ksdw_done")
+    asm.mov_imm(R0, 0)
+    asm.pop([R4, R5, R6, R7, PC])
+    asm.pool()
+
+    # ks_rt_draw_bar(R0=stack_args_ptr: [+16]=tx, [+12]=ty, [+8]=w, [+4]=cur, [+0]=maxv)
+    asm.label("ks_rt_draw_bar")
+    asm.push([R4, R5, R6, R7, LR])
+    asm.ldr(R4, R0, 16)  # tx
+    asm.ldr(R5, R0, 12)  # ty
+    asm.ldr(R6, R0, 8)   # width
+    asm.ldr(R2, R0, 4)   # cur
+    asm.ldr(R3, R0, 0)   # maxv
+    asm.cmp_imm(R6, 1)
+    asm.b("ksdb_done", "LT")
+    asm.cmp_imm(R3, 1)
+    asm.mov_imm(R3, 1, cond="LT")
+    asm.cmp_imm(R2, 0)
+    asm.mov_imm(R2, 0, cond="LT")
+    # filled = (cur * width) // maxv
+    asm.mul(R0, R2, R6)
+    asm.mov_reg(R1, R3)
+    asm.bl("ks_rt_divmod")
+    asm.mov_reg(R7, R0)  # filled count
+    # Choose BAR_ON (mint) vs BAR_LO (crimson when filled*3 <= width)
+    asm.add_reg(R0, R7, R7, "LSL", 1)
+    asm.cmp_reg(R0, R6)
+    asm.ldr_lit(R2, (15 << 12) | FONT_INDEX["BAR_LO"], cond="LE")
+    asm.ldr_lit(R2, (15 << 12) | FONT_INDEX["BAR_ON"], cond="GT")
+    asm.ldr_lit(R3, (15 << 12) | FONT_INDEX["BAR_OF"])
+    asm.and_imm(R4, R4, 31)
+    asm.and_imm(R5, R5, 31)
+    asm.ldr_lit(R12, 0x0600F000)
+    asm.add_reg(R12, R12, R5, "LSL", 6)
+    asm.add_reg(R12, R12, R4, "LSL", 1)
+    asm.mov_imm(R1, 0)
+    asm.label("ksdb_lp")
+    asm.cmp_reg(R1, R6)
+    asm.b("ksdb_done", "GE")
+    asm.cmp_reg(R1, R7)
+    asm.strh(R2, R12, 0, cond="LT")
+    asm.strh(R3, R12, 0, cond="GE")
+    asm.add_imm(R12, R12, 2)
+    asm.add_imm(R1, R1, 1)
+    asm.b("ksdb_lp")
+    asm.label("ksdb_done")
+    asm.mov_imm(R0, 0)
+    asm.pop([R4, R5, R6, R7, PC])
+
+    # ks_rt_set_fade(R0=level: -16=black .. 0=normal .. +16=white flash!)
+    asm.label("ks_rt_set_fade")
+    asm.ldr_lit(R3, 0x04000050)       # REG_BLDCNT
+    asm.cmp_imm(R0, 0)
+    asm.b("kssf_zero", "EQ")
+    asm.b("kssf_black", "LT")
+    # Brightness Increase (White Flash: mode 2 = 0x0080 | all layers 0x3F = 0x00BF)
+    asm.cmp_imm(R0, 16)
+    asm.mov_imm(R0, 16, cond="GT")
+    asm.mov_imm(R1, 0x00BF)
+    asm.strh(R1, R3, 0)
+    asm.strh(R0, R3, 4)               # REG_BLDY (0x04000054)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+    asm.label("kssf_black")
+    asm.rsb_imm(R0, R0, 0)
+    asm.cmp_imm(R0, 16)
+    asm.mov_imm(R0, 16, cond="GT")
+    asm.mov_imm(R1, 0x00FF)           # Brightness Decrease (Black Fade: mode 3 = 0x00C0 | 0x3F = 0x00FF)
+    asm.strh(R1, R3, 0)
+    asm.strh(R0, R3, 4)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+    asm.label("kssf_zero")
+    asm.mov_imm(R1, 0)
+    asm.strh(R1, R3, 0)
+    asm.strh(R1, R3, 4)
+    asm.mov_imm(R0, 0)
+    asm.bx(LR)
+    asm.pool()
 
     # Helper for draw_box / clear_ui_rect: R0=tx, R1=ty, R2=w, R3=h, R12=tile_hw
     asm.label("ks_rt_draw_box")

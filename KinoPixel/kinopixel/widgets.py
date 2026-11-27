@@ -128,6 +128,13 @@ class PixelCanvasWidget(QWidget):
     def _plot(self, x: int, y: int, col: int) -> None:
         gw, gh = self._grid_dims()
         if 0 <= x < gw and 0 <= y < gh:
+            if not self._right_erase and self.tool == "dither" and ((x + y) & 1) == 1:
+                return
+            if self.tool == "shade":
+                cur_ci = self.grid[y][x]
+                if cur_ci <= 0 or len(self.palette_hex) <= 2:
+                    return
+                col = self._shift_shade_index(cur_ci, lighter=self._right_erase)
             if self.grid[y][x] != col:
                 self.grid[y][x] = col
                 self._dirty_stroke = True
@@ -136,6 +143,28 @@ class PixelCanvasWidget(QWidget):
                 if self.grid[y][mx] != col:
                     self.grid[y][mx] = col
                     self._dirty_stroke = True
+
+    def _shift_shade_index(self, ci: int, lighter: bool = False) -> int:
+        """Pick the nearest slightly darker (or lighter) color index in the active hardware palette."""
+        def lum(hx: str) -> float:
+            c = QColor(hx)
+            return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+        cur_c = QColor(self.palette_hex[ci % len(self.palette_hex)])
+        cur_l = lum(self.palette_hex[ci % len(self.palette_hex)])
+        best_i = ci
+        best_score = 1e9
+        for i in range(1, len(self.palette_hex)):
+            if i == ci:
+                continue
+            li = lum(self.palette_hex[i])
+            if (lighter and li <= cur_l + 6) or (not lighter and li >= cur_l - 6):
+                continue
+            c = QColor(self.palette_hex[i])
+            dist = abs(li - cur_l) + 0.35 * (abs(c.red() - cur_c.red()) + abs(c.green() - cur_c.green()) + abs(c.blue() - cur_c.blue()))
+            if dist < best_score:
+                best_score = dist
+                best_i = i
+        return best_i
 
     def _flood_fill(self, sx: int, sy: int, target_col: int) -> None:
         gw, gh = self._grid_dims()

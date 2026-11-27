@@ -839,8 +839,8 @@ class GamePlaytestEngine:
         return fb
 
     def _render_kinoscript_rgb(self) -> np.ndarray:
-        """Render BG2 + BG0 + 128 OAM Sprites + BG1 Hardware Font/UI Layer for KinoScript mode."""
-        from .gba_compiler import FONT_ORDER, _FONT_BITMAPS
+        """Render BG0 + 128 OAM Sprites + BG1 Commercial 9-Slice UI Layer + Hardware Fade for KinoScript mode."""
+        from .gba_compiler import FONT_ORDER, FONT_SOLID_OFFSET, _hud_glyph_grid
         ks = self.ks_runtime
         assert ks is not None
         prof = self.project.profile()
@@ -852,8 +852,9 @@ class GamePlaytestEngine:
         pal_rgbs = [np.array([hex_to_rgb(c) for c in self.project.get_palette_colors(pi)[:16]], dtype=np.uint8)
                     for pi in range(max(1, len(self.project.palettes)))]
         hud_pal = np.array([
-            (0, 0, 0), hex_to_rgb("#0D1322"), hex_to_rgb("#F8FAFC"), hex_to_rgb("#FDE047"),
-            hex_to_rgb("#F43F5E"), hex_to_rgb("#161A26"), hex_to_rgb("#34D399"),
+            (0, 0, 0), hex_to_rgb("#0D1528"), hex_to_rgb("#F8FAFC"), hex_to_rgb("#FDE047"),
+            hex_to_rgb("#F43F5E"), hex_to_rgb("#060A14"), hex_to_rgb("#34D399"),
+            hex_to_rgb("#38BDF8"), hex_to_rgb("#1E3A5F"), hex_to_rgb("#334155"),
         ], dtype=np.uint8)
 
         # BG0 Room Tilemap with bg_scroll[0]
@@ -906,25 +907,30 @@ class GamePlaytestEngine:
                 if np.any(m):
                     fb[sy + y0: sy + y1, sx + x0: sx + x1][m] = pal[sub[m]]
 
-        # BG1 Crisp Font / UI Box / Highlight Layer (exact parity with GBA BG1 VRAM!)
+        # BG1 Crisp 9-Slice Window, Gauges & Solid-Backed Font Layer (exact parity with GBA BG1 VRAM!)
         for ty in range(min(20, vh // 8)):
             for tx in range(min(30, vw // 8)):
                 tid, pslot = ks.ui_tiles[ty][tx]
-                if tid <= 0 or tid >= len(FONT_ORDER):
+                if tid <= 0:
                     continue
-                key = FONT_ORDER[tid]
-                bmp = _FONT_BITMAPS[key]
-                c_idx = 2
-                if key == "HEART": c_idx = 4
-                elif key == "COIN": c_idx = 3
-                elif key == "BEZEL": c_idx = 5
-                elif key == "BOX": c_idx = 1
-                elif key == "BAR": c_idx = 6
-                col = hud_pal[c_idx]
+                solid_bg = tid >= FONT_SOLID_OFFSET
+                base_id = tid - FONT_SOLID_OFFSET if solid_bg else tid
+                if base_id >= len(FONT_ORDER):
+                    continue
+                g = _hud_glyph_grid(FONT_ORDER[base_id], solid_bg=solid_bg)
                 sy0, sx0 = ty * 8, tx * 8
                 for py in range(8):
-                    brow = bmp[py]
+                    grow = g[py]
                     for px in range(8):
-                        if brow[px] == "#":
-                            fb[sy0 + py, sx0 + px] = col
+                        ci = grow[px]
+                        if ci > 0:
+                            fb[sy0 + py, sx0 + px] = hud_pal[ci]
+
+        # Hardware Brightness Fade (REG_BLDCNT / REG_BLDY: -16 black .. 0 .. +16 white flash!)
+        if ks.fade_level < 0:
+            factor = max(0.0, 1.0 + ks.fade_level / 16.0)
+            fb = (fb.astype(np.float32) * factor).astype(np.uint8)
+        elif ks.fade_level > 0:
+            alpha = min(1.0, ks.fade_level / 16.0)
+            fb = (fb.astype(np.float32) + (255.0 - fb.astype(np.float32)) * alpha).astype(np.uint8)
         return fb
